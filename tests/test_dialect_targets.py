@@ -47,3 +47,26 @@ def test_first_table_name_factory():
     t = first_table_name(get_dialect("mssql"))
     assert "INFORMATION_SCHEMA.TABLES" in t.expression
     assert t.name.startswith("TABLE_NAME")
+
+
+from blindsqli.targets import nth_database_name, first_column_name, _catalog_prefix
+
+
+def test_first_table_name_database_scope():
+    t = first_table_name(get_dialect("mssql"), database="appdb")
+    assert "[appdb].INFORMATION_SCHEMA.TABLES" in t.expression
+
+
+def test_nth_database_name_uses_sys_databases():
+    assert "sys.databases" in nth_database_name(get_dialect("mssql"), 0).expression
+    assert "OFFSET 2 ROWS" in nth_database_name(get_dialect("mssql"), 2).expression
+
+
+def test_column_name_database_scope():
+    t = first_column_name(get_dialect("mssql"), "jun_users", offset=1, database="appdb")
+    assert "[appdb].INFORMATION_SCHEMA.COLUMNS" in t.expression
+
+
+def test_catalog_prefix_escapes_bracket():
+    assert _catalog_prefix("a]b") == "[a]]b]."
+    assert _catalog_prefix(None) == ""

@@ -208,6 +208,24 @@ Output is a JSON list:
 Enumerate a table's columns with `--what columns --table jun_users`, and cap the
 number of rows with `--limit N`.
 
+### Choosing a database
+
+`INFORMATION_SCHEMA` only sees the **current** database, so plain table
+enumeration returns just that one database's tables. To work across databases:
+
+```bash
+# list every database on the server (MSSQL sys.databases)
+python -m blindsqli enumerate --what databases ...
+
+# then scope table/column enumeration to a specific one (three-part naming)
+python -m blindsqli enumerate --what tables  --database LabDB ...
+python -m blindsqli enumerate --what columns --table jun_users --database LabDB ...
+```
+
+`--database` also works on `extract --preset first-table`. Against the local lab
+this lists `LabDB` plus the MSSQL system databases, and scoping to `LabDB` vs
+`master` returns entirely different table sets.
+
 ### Remembering what was already extracted
 
 Pass `--knowledge FILE` to any `extract` or `enumerate` run. Before the run the

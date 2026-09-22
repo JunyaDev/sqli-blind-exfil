@@ -65,29 +65,63 @@ class Target:
 # --- convenience factories for common metadata targets ---------------------
 # These are just preset Target instances; the engine treats them all the same.
 
-def first_table_name(dialect: SqlDialect, offset: int = 0) -> Target:
-    """First (offset-th) table name from INFORMATION_SCHEMA (MSSQL-style)."""
+def _catalog_prefix(database: str) -> str:
+    """Three-part-name catalog prefix for a database, e.g. '[appdb].' (MSSQL).
+
+    INFORMATION_SCHEMA is scoped to the current database, so to read another
+    database's metadata you qualify it with the database (catalog) name. The
+    name is bracket-quoted (']' doubled) to tolerate awkward identifiers.
+    """
+    if not database:
+        return ""
+    return "[" + database.replace("]", "]]") + "]."
+
+
+def first_table_name(dialect: SqlDialect, offset: int = 0, database: str = None) -> Target:
+    """First (offset-th) table name from INFORMATION_SCHEMA (MSSQL-style).
+
+    If *database* is given, read that database's catalog instead of the current
+    one (three-part naming).
+    """
+    src = f"{_catalog_prefix(database)}INFORMATION_SCHEMA.TABLES"
     if offset == 0:
-        expr = "(SELECT TOP(1) TABLE_NAME FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME)"
+        expr = f"(SELECT TOP(1) TABLE_NAME FROM {src} ORDER BY TABLE_NAME)"
     else:
         expr = (
-            f"(SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME "
+            f"(SELECT TABLE_NAME FROM {src} ORDER BY TABLE_NAME "
             f"OFFSET {offset} ROWS FETCH NEXT 1 ROWS ONLY)"
         )
-    return Target(name=f"TABLE_NAME[{offset}]", expression=expr, dialect=dialect)
+    label = f"TABLE_NAME[{offset}]" if not database else f"TABLE_NAME[{database}:{offset}]"
+    return Target(name=label, expression=expr, dialect=dialect)
 
 
 def database_name(dialect: SqlDialect) -> Target:
+    """The current database name."""
     return Target(name="DB_NAME", expression="(SELECT DB_NAME())", dialect=dialect)
 
 
-def first_column_name(dialect: SqlDialect, table: str, offset: int = 0) -> Target:
+def nth_database_name(dialect: SqlDialect, offset: int = 0) -> Target:
+    """The offset-th database name on the server (MSSQL sys.databases)."""
+    if offset == 0:
+        expr = "(SELECT TOP(1) name FROM sys.databases ORDER BY name)"
+    else:
+        expr = (
+            f"(SELECT name FROM sys.databases ORDER BY name "
+            f"OFFSET {offset} ROWS FETCH NEXT 1 ROWS ONLY)"
+        )
+    return Target(name=f"DATABASE_NAME[{offset}]", expression=expr, dialect=dialect)
+
+
+def first_column_name(dialect: SqlDialect, table: str, offset: int = 0,
+                      database: str = None) -> Target:
+    src = f"{_catalog_prefix(database)}INFORMATION_SCHEMA.COLUMNS"
     expr = (
-        f"(SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+        f"(SELECT COLUMN_NAME FROM {src} "
         f"WHERE TABLE_NAME = '{table}' ORDER BY ORDINAL_POSITION "
         f"OFFSET {offset} ROWS FETCH NEXT 1 ROWS ONLY)"
     )
-    return Target(name=f"COLUMN_NAME[{table}:{offset}]", expression=expr, dialect=dialect)
+    label = f"COLUMN_NAME[{table}:{offset}]" if not database else f"COLUMN_NAME[{database}.{table}:{offset}]"
+    return Target(name=label, expression=expr, dialect=dialect)
 
 
 def custom(dialect: SqlDialect, name: str, expression: str) -> Target:

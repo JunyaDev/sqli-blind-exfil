@@ -110,6 +110,10 @@ class Config:
     target_name: str = "TABLE_NAME"
     target_expression: str = "(SELECT TOP(1) TABLE_NAME FROM INFORMATION_SCHEMA.TABLES)"
     dialect: str = "mssql"
+    # Scope table/column enumeration to a specific database (catalog). None =
+    # the current database. INFORMATION_SCHEMA only sees the current database, so
+    # this qualifies it with a three-part name (e.g. [otherdb].INFORMATION_SCHEMA).
+    database: Optional[str] = None
     # Override the SQL comparison collation. None = use the dialect default
     # (MSSQL forces a binary, case-sensitive collation so ordering/case are
     # exact). "" disables the COLLATE clause entirely (use if the default

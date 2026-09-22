@@ -134,3 +134,28 @@ def test_enumerate_all_tables(tmp_path):
         data = json.loads(out.read_text())
         assert data["count"] == 3
         assert data["values"] == ["jun_notes", "jun_roles", "jun_users"]
+
+
+def test_enumerate_databases(tmp_path):
+    pytest.importorskip("requests")
+    from mock_target import MockTarget
+    with MockTarget(secrets=["appdb", "master"], param="q", port=0) as srv:
+        out = tmp_path / "dbs.json"
+        rc = main(["enumerate", "--what", "databases", "--url", srv.url, "--param", "q",
+                   "--quiet", "--output", str(out)])
+        assert rc == 0
+        data = json.loads(out.read_text())
+        assert data["values"] == ["appdb", "master"]
+
+
+def test_enumerate_tables_scoped_to_database(tmp_path):
+    pytest.importorskip("requests")
+    from mock_target import MockTarget
+    with MockTarget(secrets=["jun_notes", "jun_roles", "jun_users"], param="q", port=0) as srv:
+        out = tmp_path / "t.json"
+        rc = main(["enumerate", "--url", srv.url, "--param", "q", "--database", "otherdb",
+                   "--quiet", "--output", str(out)])
+        assert rc == 0
+        data = json.loads(out.read_text())
+        assert data["count"] == 3
+        assert data["values"] == ["jun_notes", "jun_roles", "jun_users"]
