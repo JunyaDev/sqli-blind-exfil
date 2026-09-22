@@ -207,3 +207,30 @@ def test_end_to_end_export_then_extract(tmp_path):
         result = ExfiltrationEngine(cfg, oracle).extract(first_table_name(get_dialect("mssql")))
         assert result.value == "jun_users"
         assert result.complete is True
+
+
+# --- JSON body that is a top-level array ------------------------------------
+
+ARRAY_RAW = (
+    "POST /api HTTP/1.1\r\n"
+    "Host: h\r\n"
+    "Content-Type: application/json\r\n"
+    "\r\n"
+    '[{"code":"HELLO","vulnerableParam":"123"}]'
+)
+
+
+def test_enumerate_json_array_body():
+    m = core.parse_request(ARRAY_RAW, "http", "h", 80)
+    names = [(p.name, p.location) for p in core.enumerate_parameters(m)]
+    assert ("[0].vulnerableParam", "json") in names
+    assert ("[0].code", "json") in names
+
+
+def test_build_json_array_config():
+    m = core.parse_request(ARRAY_RAW, "http", "h", 80)
+    cfg = core.build_request_config(m, _select(m, "[0].vulnerableParam", "json"))
+    assert cfg["body_mode"] == "json"
+    assert cfg["injection_param"] == "[0].vulnerableParam"
+    assert cfg["json_template"] == [{"code": "HELLO", "vulnerableParam": "123"}]
+    assert cfg["target_url"] == "http://h/api"

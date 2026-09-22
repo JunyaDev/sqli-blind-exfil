@@ -168,5 +168,5 @@ class Config:
                 raise ValueError("body_mode=raw requires body_template")
             if "{value}" not in self.body_template and "{value_json}" not in self.body_template:
                 raise ValueError("body_template must contain {value} or {value_json}")
-        if mode == "json" and self.json_template is not None and not isinstance(self.json_template, dict):
-            raise ValueError("json_template must be a JSON object (dict)")
+        if mode == "json" and self.json_template is not None and not isinstance(self.json_template, (dict, list)):
+            raise ValueError("json_template must be a JSON object or array (dict or list)")

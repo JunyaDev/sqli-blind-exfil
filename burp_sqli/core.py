@@ -132,21 +132,25 @@ def parse_request(raw_request, scheme, host, port):
 # parameter enumeration
 # --------------------------------------------------------------------------- #
 def _flatten_json(obj, prefix=""):
-    """Dotted paths to scalar leaves reachable through dict keys.
+    """Dotted/indexed paths to scalar leaves anywhere in the JSON.
 
-    List contents are skipped: the tool addresses JSON by dotted dict path and
-    cannot index into arrays, so offering an array element would produce a path
-    it could not use.
+    Dict keys use dotted notation and array elements use ``[i]``, e.g. a body of
+    ``[{"code":"X","vulnerableParam":"1"}]`` yields ``[0].code`` and
+    ``[0].vulnerableParam``. The tool understands the same syntax.
     """
     out = []
     if isinstance(obj, dict):
         for k, v in obj.items():
             path = k if not prefix else prefix + "." + k
             out += _flatten_json(v, path)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            path = "[{0}]".format(i) if not prefix else prefix + "[{0}]".format(i)
+            out += _flatten_json(v, path)
     elif isinstance(obj, (str, bytes)) or obj is True or obj is False or _is_number(obj):
         if prefix:
             out.append((prefix, _as_text(obj)))
-    # lists / None -> skipped
+    # None -> skipped
     return out
 
 

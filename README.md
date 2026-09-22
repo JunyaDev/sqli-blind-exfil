@@ -245,6 +245,10 @@ python -m blindsqli extract --url http://host/api/search --method POST \
 That sends `{"page":1,"creds":{"username":"<payload>"}}`. The value is placed
 via a real JSON encoder, so SQL quotes and backslashes are escaped correctly.
 
+The path supports **array indices** too, so a body that is a top-level array
+like `[{"code":"X","vulnerableParam":"1"}]` is reached with
+`--param '[0].vulnerableParam'` (segments: `data.items[2].name` also works).
+
 For non-standard bodies (nested arrays, GraphQL, XML) use a raw template with a
 placeholder — `{value_json}` is JSON-string-escaped, `{value}` is verbatim:
 

@@ -118,3 +118,47 @@ def test_extract_over_raw_json_template():
         result = ExfiltrationEngine(cfg, oracle).extract(first_table_name(get_dialect("mssql")))
         assert result.value == "jun_users"
         assert result.complete is True
+
+
+# --- JSON path with array indices -------------------------------------------
+
+def test_parse_path_variants():
+    from blindsqli.http_client import HttpClient
+    assert HttpClient._parse_path("creds.username") == ["creds", "username"]
+    assert HttpClient._parse_path("[0].vulnerableParam") == [0, "vulnerableParam"]
+    assert HttpClient._parse_path("data.items[2].name") == ["data", "items", 2, "name"]
+
+
+def test_set_path_into_array():
+    from blindsqli.http_client import HttpClient
+    obj = [{"code": "X", "vulnerableParam": "seed"}]
+    HttpClient._set_path(obj, "[0].vulnerableParam", "INJ")
+    assert obj == [{"code": "X", "vulnerableParam": "INJ"}]
+
+
+def test_json_array_root_build_request():
+    c = client(body_mode="json", injection_param="[0].vulnerableParam",
+               json_template=[{"code": "HELLO", "vulnerableParam": "x"}])
+    kw = c.build_request("VAL", "POST")
+    assert kw == {"json": [{"code": "HELLO", "vulnerableParam": "VAL"}]}
+
+
+def test_extract_over_json_array_body():
+    pytest.importorskip("requests")
+    from blindsqli.oracle import BooleanOracle
+    from blindsqli.engine import ExfiltrationEngine
+    from blindsqli.dialect import get_dialect
+    from blindsqli.targets import first_table_name
+    from mock_target import MockTarget
+
+    with MockTarget(secret="jun_users", port=0) as srv:
+        cfg = Config(
+            target_url=srv.url, http_method="POST", body_mode="json",
+            injection_param="[0].vulnerableParam",
+            json_template=[{"code": "HELLO", "vulnerableParam": "seed"}],
+            workers=6, verbosity=0,
+        )
+        oracle = BooleanOracle(cfg)
+        result = ExfiltrationEngine(cfg, oracle).extract(first_table_name(get_dialect("mssql")))
+        assert result.value == "jun_users"
+        assert result.complete is True

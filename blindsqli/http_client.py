@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from .config import Config
 from .logging_util import Logger
@@ -83,18 +84,41 @@ class HttpClient:
             return "query" if method == "GET" else "form"
         return mode
 
-    @staticmethod
-    def _set_path(obj: Dict[str, Any], dotted: str, value: Any) -> None:
-        """Set value at a dotted key path, creating intermediate dicts."""
-        keys = dotted.split(".")
+    _PATH_TOKEN = re.compile(r"\[(\d+)\]|([^.\[\]]+)")
+
+    @classmethod
+    def _parse_path(cls, path: str) -> List[Union[str, int]]:
+        """Tokenize a path into dict keys and list indices.
+
+        Examples: 'creds.username' -> ['creds','username'];
+                  '[0].vulnerableParam' -> [0,'vulnerableParam'];
+                  'data.items[2].name' -> ['data','items',2,'name'].
+        """
+        tokens: List[Union[str, int]] = []
+        for m in cls._PATH_TOKEN.finditer(path):
+            if m.group(1) is not None:
+                tokens.append(int(m.group(1)))
+            else:
+                tokens.append(m.group(2))
+        return tokens
+
+    @classmethod
+    def _set_path(cls, obj: Any, path: str, value: Any) -> None:
+        """Set value at a dotted/indexed path. Navigates existing dicts and
+        lists; creates intermediate dicts only for missing string keys (list
+        elements are expected to already exist in the JSON template)."""
+        tokens = cls._parse_path(path)
         cur = obj
-        for k in keys[:-1]:
-            nxt = cur.get(k)
-            if not isinstance(nxt, dict):
-                nxt = {}
-                cur[k] = nxt
-            cur = nxt
-        cur[keys[-1]] = value
+        for tok in tokens[:-1]:
+            if isinstance(tok, int):
+                cur = cur[tok]
+            else:
+                nxt = cur.get(tok) if isinstance(cur, dict) else None
+                if not isinstance(nxt, (dict, list)):
+                    nxt = {}
+                    cur[tok] = nxt
+                cur = nxt
+        cur[tokens[-1]] = value
 
     def build_request(self, injected_value: str, method: str) -> Dict[str, Any]:
         """Return the requests kwargs that carry *injected_value* per body_mode.
@@ -113,7 +137,12 @@ class HttpClient:
             cookies[self.config.injection_param] = injected_value
             return {"cookies": cookies}
         if mode == "json":
-            body: Dict[str, Any] = copy.deepcopy(self.config.json_template) if self.config.json_template else {}
+            # the template may be a dict or a top-level list; use `is not None`
+            # so an intentional list root isn't turned into {}
+            if self.config.json_template is not None:
+                body = copy.deepcopy(self.config.json_template)
+            else:
+                body = {}
             self._set_path(body, self.config.injection_param, injected_value)
             return {"json": body}
         # raw
