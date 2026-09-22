@@ -23,6 +23,10 @@ DEFAULT_CHARSET = (
     string.ascii_lowercase + string.ascii_uppercase + string.digits + "_$# ."
 )
 
+# Broad printable-ASCII set for extracting real data values (emails, passwords,
+# etc.), which contain punctuation the identifier-oriented default omits.
+PRINTABLE_CHARSET = "".join(chr(c) for c in range(32, 127))
+
 
 @dataclass
 class ClassifierConfig:

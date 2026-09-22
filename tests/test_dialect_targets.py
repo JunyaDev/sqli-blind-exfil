@@ -70,3 +70,33 @@ def test_column_name_database_scope():
 def test_catalog_prefix_escapes_bracket():
     assert _catalog_prefix("a]b") == "[a]]b]."
     assert _catalog_prefix(None) == ""
+
+
+from blindsqli.targets import row_value, row_count_expr
+
+
+def test_row_count_expr_qualified():
+    assert row_count_expr("LabDB", "dbo", "jun_users") == "(SELECT COUNT(*) FROM [LabDB].[dbo].[jun_users])"
+
+
+def test_row_value_concatenates_columns():
+    t = row_value(get_dialect("mssql"), "jun_users", ["dan_username", "dan_email"],
+                  offset=2, database="LabDB", sep=":")
+    assert "CONCAT(dan_username, ':', dan_email)" in t.expression
+    assert "[LabDB].[dbo].[jun_users]" in t.expression
+    assert "OFFSET 2 ROWS FETCH NEXT 1 ROWS ONLY" in t.expression
+
+
+def test_row_value_single_column_no_concat():
+    t = row_value(get_dialect("mssql"), "t", ["c"], offset=0)
+    assert "CONCAT" not in t.expression and "[dbo].[t]" in t.expression
+
+
+def test_row_value_custom_expr_overrides_columns():
+    t = row_value(get_dialect("mssql"), "t", [], row_expr="HASHBYTES('SHA2_256', pw)")
+    assert "HASHBYTES('SHA2_256', pw)" in t.expression
+
+
+def test_row_value_where_and_orderby():
+    t = row_value(get_dialect("mssql"), "u", ["name"], where="id>0", order_by="id")
+    assert "WHERE id>0" in t.expression and "ORDER BY id" in t.expression

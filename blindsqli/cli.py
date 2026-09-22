@@ -16,7 +16,7 @@ import sys
 from typing import Optional
 
 from . import __version__
-from .config import Config
+from .config import Config, DEFAULT_CHARSET, PRINTABLE_CHARSET
 from .dialect import get_dialect
 from .engine import ExfiltrationEngine
 from .logging_util import Logger
@@ -98,11 +98,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     en = sub.add_parser("enumerate", help="extract every value of a metadata set (e.g. all table names)")
     add_common(en)
-    en.add_argument("--what", choices=["databases", "tables", "columns"], default="tables",
+    en.add_argument("--what", choices=["databases", "tables", "columns", "rows"], default="tables",
                     help="what to enumerate (default: tables)")
-    en.add_argument("--table", dest="table", help="table name (required for --what columns)")
+    en.add_argument("--table", dest="table", help="table name (required for --what columns/rows)")
     en.add_argument("--database", dest="database",
-                    help="scope tables/columns to this database (default: the current one)")
+                    help="scope tables/columns/rows to this database (default: the current one)")
+    en.add_argument("--columns", dest="columns",
+                    help="comma-separated columns for --what rows (concatenated per row)")
+    en.add_argument("--sep", dest="sep", default=":",
+                    help="separator between concatenated columns (default ':')")
+    en.add_argument("--schema", dest="schema", default="dbo",
+                    help="table schema for --what rows (default: dbo)")
+    en.add_argument("--where", dest="where", help="optional SQL WHERE filter for --what rows")
+    en.add_argument("--order-by", dest="order_by",
+                    help="ORDER BY expression for --what rows (default: first column)")
+    en.add_argument("--row-expr", dest="row_expr",
+                    help="custom scalar row expression for --what rows (overrides --columns)")
     en.add_argument("--limit", dest="limit", type=int, default=0, help="max rows (0 = all)")
     en.add_argument("--max-count", dest="max_count", type=int, default=4096)
     en.add_argument("--charset", dest="charset")
@@ -223,6 +234,12 @@ def cmd_extract(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
 
 
 def cmd_enumerate(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
+    what = getattr(args, "what", "tables")
+    # Real data values contain punctuation the identifier charset omits; widen it
+    # for --what rows unless the caller set an explicit charset.
+    if what == "rows" and getattr(args, "charset", None) is None and cfg.charset == DEFAULT_CHARSET:
+        cfg.charset = PRINTABLE_CHARSET
+
     reporter = NullReporter() if cfg.verbosity == 0 else TerminalReporter(verbosity=cfg.verbosity)
     oracle = BooleanOracle(cfg, logger=logger)
     predictor = CharacterPredictor(cfg.charset, order=cfg.predictor_order)
@@ -240,7 +257,6 @@ def cmd_enumerate(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
     if cfg.collation is not None:
         dialect.collation = cfg.collation or None
 
-    what = getattr(args, "what", "tables")
     database = cfg.database
     catalog = targets_mod._catalog_prefix(database) if database else ""
     if what == "databases":
@@ -253,6 +269,25 @@ def cmd_enumerate(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
         tbl = args.table.replace("'", "''")
         count_expr = f"(SELECT COUNT(*) FROM {catalog}INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='{tbl}')"
         row = lambda i: targets_mod.first_column_name(dialect, args.table, offset=i, database=database)
+    elif what == "rows":
+        table = getattr(args, "table", None)
+        if not table:
+            logger.error("--what rows requires --table")
+            return 2
+        cols = [c.strip() for c in (getattr(args, "columns", None) or "").split(",") if c.strip()]
+        row_expr = getattr(args, "row_expr", None)
+        if not cols and not row_expr:
+            logger.error("--what rows requires --columns or --row-expr")
+            return 2
+        schema = getattr(args, "schema", None) or "dbo"
+        sep = getattr(args, "sep", ":")
+        where = getattr(args, "where", None)
+        order_by = getattr(args, "order_by", None)
+        count_expr = targets_mod.row_count_expr(database, schema, table, where=where)
+        row = lambda i: targets_mod.row_value(
+            dialect, table, cols, offset=i, database=database, schema=schema,
+            sep=sep, where=where, order_by=order_by, row_expr=row_expr,
+        )
     else:
         count_expr = f"(SELECT COUNT(*) FROM {catalog}INFORMATION_SCHEMA.TABLES)"
         row = lambda i: targets_mod.first_table_name(dialect, offset=i, database=database)

@@ -159,3 +159,17 @@ def test_enumerate_tables_scoped_to_database(tmp_path):
         data = json.loads(out.read_text())
         assert data["count"] == 3
         assert data["values"] == ["jun_notes", "jun_roles", "jun_users"]
+
+
+def test_enumerate_row_values_concat(tmp_path):
+    pytest.importorskip("requests")
+    from mock_target import MockTarget
+    # mock rows are the already-concatenated values the tool should recover
+    with MockTarget(secrets=["admin:a@x.com", "bob:b@y.io"], param="q", port=0) as srv:
+        out = tmp_path / "rows.json"
+        rc = main(["enumerate", "--what", "rows", "--table", "jun_users",
+                   "--columns", "dan_username,dan_email", "--sep", ":",
+                   "--url", srv.url, "--param", "q", "--quiet", "--output", str(out)])
+        assert rc == 0
+        data = json.loads(out.read_text())
+        assert data["values"] == ["admin:a@x.com", "bob:b@y.io"]

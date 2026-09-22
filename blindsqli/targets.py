@@ -124,6 +124,52 @@ def first_column_name(dialect: SqlDialect, table: str, offset: int = 0,
     return Target(name=label, expression=expr, dialect=dialect)
 
 
+def _bracket(name: str) -> str:
+    return "[" + name.replace("]", "]]") + "]"
+
+
+def _table_source(database, schema, table) -> str:
+    """Fully-qualified table source, e.g. '[LabDB].[dbo].[jun_users]'."""
+    cat = _catalog_prefix(database)
+    return f"{cat}{_bracket(schema or 'dbo')}.{_bracket(table)}"
+
+
+def row_count_expr(database, schema, table, where=None) -> str:
+    src = _table_source(database, schema, table)
+    filt = f" WHERE {where}" if where else ""
+    return f"(SELECT COUNT(*) FROM {src}{filt})"
+
+
+def row_value(dialect: SqlDialect, table: str, columns, offset: int = 0,
+              database: str = None, schema: str = "dbo", sep: str = ":",
+              where: str = None, order_by: str = None, row_expr: str = None) -> Target:
+    """A single row's value from a data table, one row per *offset*.
+
+    Multiple *columns* are concatenated with *sep* using CONCAT (NULL-safe and
+    auto-casting in MSSQL), so e.g. columns=['user','pass'] yields 'user:pass'.
+    A raw *row_expr* overrides *columns* for full control.
+    """
+    src = _table_source(database, schema, table)
+    filt = f" WHERE {where}" if where else ""
+    if row_expr:
+        value_expr = row_expr
+    elif len(columns) == 1:
+        value_expr = columns[0]
+    else:
+        parts = []
+        for i, col in enumerate(columns):
+            if i:
+                parts.append(dialect.quote_str(sep))
+            parts.append(col)
+        value_expr = "CONCAT(" + ", ".join(parts) + ")"
+    order = order_by or (columns[0] if columns else "(SELECT NULL)")
+    expr = (
+        f"(SELECT {value_expr} FROM {src}{filt} ORDER BY {order} "
+        f"OFFSET {offset} ROWS FETCH NEXT 1 ROWS ONLY)"
+    )
+    return Target(name=f"ROW[{table}:{offset}]", expression=expr, dialect=dialect)
+
+
 def custom(dialect: SqlDialect, name: str, expression: str) -> Target:
     """Wrap any scalar-returning subquery the operator supplies."""
     return Target(name=name, expression=expression, dialect=dialect)
