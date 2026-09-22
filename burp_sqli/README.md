@@ -89,6 +89,15 @@ python -m blindsqli extract --config ~/blindsqli_config.json \
 `--base-payload` is SQLi logic, not request data, so it is intentionally not
 exported from Burp.
 
+## Troubleshooting
+
+- **`NameError: name '__file__' is not defined`** on load: Burp's Jython does
+  not define `__file__`. This is handled — the extension falls back to the
+  current frame's path and then to searching `sys.path` for `core.py`. Just make
+  sure `core.py` sits in the **same folder** as `extension.py`. If you moved
+  them apart, add the folder under Extender → Options → Python Environment →
+  "Folder for loading modules".
+
 ## Tests
 
 The pure logic is covered by `tests/test_burp_export.py` (run from the project

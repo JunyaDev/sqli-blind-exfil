@@ -7,11 +7,36 @@ no Burp dependency and is unit-tested separately. Load this file in Burp:
 (Jython standalone JAR must be configured under Extender -> Options.)
 """
 
+import inspect
 import os
 import sys
 
+
+def _this_dir():
+    """Directory of this file.
+
+    Burp's Jython does not define ``__file__`` when it loads an extension, so
+    fall back to the current frame's filename, then to searching sys.path for
+    the sibling ``core`` module.
+    """
+    try:
+        return os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        pass
+    try:
+        here = inspect.getfile(inspect.currentframe())
+        if here:
+            return os.path.dirname(os.path.abspath(here))
+    except Exception:
+        pass
+    for entry in sys.path:
+        if entry and os.path.exists(os.path.join(entry, "core.py")):
+            return entry
+    return os.getcwd()
+
+
 # make the sibling `core` module importable regardless of how Burp loads us
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _this_dir())
 import core  # noqa: E402
 
 from burp import IBurpExtender, IContextMenuFactory  # noqa: E402
