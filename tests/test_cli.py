@@ -82,3 +82,22 @@ def test_proxy_absent_keeps_config_value():
     base = Config(proxy="http://10.0.0.1:3128")
     cfg = _apply_overrides(base, args)
     assert cfg.proxy == "http://10.0.0.1:3128"
+
+
+def test_config_flag_accepted_after_subcommand():
+    # regression: "extract --config X" used to fail with "unrecognized arguments"
+    parser = build_parser()
+    args = parser.parse_args(["extract", "--config", "cfg.json", "--preset", "first-table"])
+    assert args.config == "cfg.json"
+
+
+def test_config_flag_accepted_before_subcommand():
+    parser = build_parser()
+    args = parser.parse_args(["--config", "cfg.json", "extract"])
+    assert args.config == "cfg.json"
+
+
+def test_config_flag_absent_is_none():
+    parser = build_parser()
+    args = parser.parse_args(["extract"])
+    assert args.config is None

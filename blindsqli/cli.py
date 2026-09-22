@@ -38,6 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     def add_common(sp: argparse.ArgumentParser) -> None:
+        # Also accept --config after the subcommand (the natural position).
+        # SUPPRESS default so it never overwrites a value given before it.
+        sp.add_argument("--config", dest="config", default=argparse.SUPPRESS,
+                        help="YAML or JSON config file (accepted here or before the subcommand)")
         sp.add_argument("--url", dest="target_url")
         sp.add_argument("--method", dest="http_method", choices=["GET", "POST", "get", "post"])
         sp.add_argument("--param", dest="injection_param")
