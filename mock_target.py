@@ -138,8 +138,32 @@ def extract_condition(injected_value: str) -> str | None:
     return m.group(1) if m else None
 
 
+_RE_COUNT = re.compile(r"COUNT\(\*\)", re.IGNORECASE)
+_RE_COUNT_CMP = re.compile(r"(<=|>=|<|>|=)\s*(\d+)")
+_RE_OFFSET = re.compile(r"OFFSET\s+(\d+)\s+ROWS", re.IGNORECASE)
+
+
+def evaluate_condition_multi(condition: str, secrets: list) -> bool:
+    """Evaluate a condition against a *rowset*.
+
+    Adds two things over the single-secret evaluator so the mock can serve
+    enumeration: COUNT(*) comparisons against the number of rows, and OFFSET n
+    row selection.
+    """
+    if _RE_COUNT.search(condition):
+        m = _RE_COUNT_CMP.search(condition)
+        if not m:
+            return False
+        op, num, c = m.group(1), int(m.group(2)), len(secrets)
+        return {"<=": c <= num, ">=": c >= num, "<": c < num, ">": c > num, "=": c == num}[op]
+    m = _RE_OFFSET.search(condition)
+    idx = int(m.group(1)) if m else 0
+    secret = secrets[idx] if 0 <= idx < len(secrets) else ""
+    return evaluate_condition(condition, secret)
+
+
 class _Handler(BaseHTTPRequestHandler):
-    secret = "jun_users"
+    secrets = ["jun_users"]
     param = "q"
 
     def log_message(self, *args) -> None:  # silence default logging
@@ -152,7 +176,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, OK_BODY)
             return
         try:
-            is_true = evaluate_condition(cond, self.secret)
+            is_true = evaluate_condition_multi(cond, self.secrets)
         except Exception:
             is_true = False
         if is_true:
@@ -212,8 +236,12 @@ class _Handler(BaseHTTPRequestHandler):
 class MockTarget:
     """Context-managed background mock server bound to loopback."""
 
-    def __init__(self, secret: str = "jun_users", param: str = "q", port: int = 0) -> None:
-        handler = type("Handler", (_Handler,), {"secret": secret, "param": param})
+    def __init__(self, secret: str = "jun_users", param: str = "q", port: int = 0,
+                 secrets: list = None) -> None:
+        # `secrets` (a list, in ORDER BY order) enables enumeration via COUNT and
+        # OFFSET; `secret` remains for the single-value case.
+        rows = list(secrets) if secrets is not None else [secret]
+        handler = type("Handler", (_Handler,), {"secrets": rows, "param": param})
         self.server = ThreadingHTTPServer(("127.0.0.1", port), handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 

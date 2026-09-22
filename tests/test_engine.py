@@ -115,3 +115,24 @@ def test_binary_search_falls_back_to_linear_on_ordering_mismatch():
     result = ExfiltrationEngine(cfg, oracle, logger=None).extract(make_target())
     assert result.value == "s"
     assert result.complete is True
+
+
+def test_discover_count():
+    import re
+    from blindsqli.result_types import OracleObservation, OracleResult
+
+    class CountOracle:
+        def __init__(self, n):
+            self.n = n
+            self.requests_completed = 0
+            self.requests_failed = 0
+        def ensure_classifier(self):
+            pass
+        def ask(self, condition):
+            self.requests_completed += 1
+            m = re.search(r"<=\s*(\d+)", condition)
+            val = self.n <= int(m.group(1))
+            return OracleObservation(condition, OracleResult.TRUE if val else OracleResult.FALSE, 1)
+
+    engine = ExfiltrationEngine(Config(verbosity=0), CountOracle(3), logger=None)
+    assert engine.discover_count("(SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES)", max_count=64) == 3

