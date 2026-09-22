@@ -234,3 +234,37 @@ def test_build_json_array_config():
     assert cfg["injection_param"] == "[0].vulnerableParam"
     assert cfg["json_template"] == [{"code": "HELLO", "vulnerableParam": "123"}]
     assert cfg["target_url"] == "http://h/api"
+
+
+MIXED_JSON_RAW = (
+    "POST /api HTTP/1.1\r\n"
+    "Host: h\r\n"
+    "Content-Type: application/json\r\n"
+    "\r\n"
+    '{"s":"txt","n":5,"f":1.5,"b":true,"z":null,"nested":{"deep":"x"}}'
+)
+
+
+def test_enumerate_all_json_scalar_types():
+    """String, number, float, boolean and null leaves are all selectable.
+
+    (Regression: under Jython, JSON strings arrive as `unicode` and were being
+    dropped, leaving only ints/booleans.)
+    """
+    m = core.parse_request(MIXED_JSON_RAW, "http", "h", 80)
+    got = {(p.name, p.value) for p in core.enumerate_parameters(m)}
+    assert ("s", "txt") in got
+    assert ("n", "5") in got
+    assert ("f", "1.5") in got
+    assert ("b", "true") in got
+    assert ("z", "null") in got
+    assert ("nested.deep", "x") in got
+    # all are JSON-located
+    assert all(p.location == "json" for p in core.enumerate_parameters(m))
+
+
+def test_unicode_json_string_is_selectable():
+    """Simulate Jython's unicode strings explicitly."""
+    data = {"user": u"admin", "n": 1}
+    leaves = dict(core._flatten_json(data))
+    assert "user" in leaves and leaves["user"] == u"admin"

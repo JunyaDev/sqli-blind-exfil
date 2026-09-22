@@ -23,6 +23,15 @@ try:  # Python 3
 except ImportError:  # Python 2 / Jython
     from urlparse import urlsplit, urlunsplit, parse_qsl
 
+# Text types differ between CPython 3 and Jython 2.7: under Jython json.loads
+# returns JSON strings as `unicode`, which is NOT `str`. Match both, or string
+# values would silently be dropped from the parameter list (leaving only
+# ints/bools, which was the reported bug).
+try:
+    _TEXT_TYPES = (str, unicode)  # noqa: F821  (unicode exists only on Py2/Jython)
+except NameError:
+    _TEXT_TYPES = (str,)
+
 # The config keys that describe the request/target. Only these are written on
 # export; every other key in an existing file is preserved untouched.
 REQUEST_KEYS = [
@@ -147,21 +156,38 @@ def _flatten_json(obj, prefix=""):
         for i, v in enumerate(obj):
             path = "[{0}]".format(i) if not prefix else prefix + "[{0}]".format(i)
             out += _flatten_json(v, path)
-    elif isinstance(obj, (str, bytes)) or obj is True or obj is False or _is_number(obj):
+    elif _is_scalar(obj):
         if prefix:
             out.append((prefix, _as_text(obj)))
-    # None -> skipped
+    # dict/list are containers (handled above); nothing else is a leaf
     return out
 
 
-def _is_number(x):
-    return isinstance(x, (int, float)) and not isinstance(x, bool)
+def _is_scalar(obj):
+    """True for JSON leaf values: string, number, boolean, or null."""
+    if isinstance(obj, bool):
+        return True
+    if isinstance(obj, _TEXT_TYPES) or isinstance(obj, bytes):
+        return True
+    if isinstance(obj, (int, float)):
+        return True
+    if obj is None:
+        return True
+    return False
 
 
 def _as_text(x):
-    if isinstance(x, bytes):
+    if x is None:
+        return "null"
+    if x is True:
+        return "true"
+    if x is False:
+        return "false"
+    if isinstance(x, bytes) and not isinstance(x, _TEXT_TYPES):
         return x.decode("utf-8", "replace")
-    return x if isinstance(x, str) else str(x)
+    if isinstance(x, _TEXT_TYPES):
+        return x
+    return str(x)
 
 
 def _body_is_json(model):
