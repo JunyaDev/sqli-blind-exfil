@@ -136,3 +136,45 @@ def test_discover_count():
 
     engine = ExfiltrationEngine(Config(verbosity=0), CountOracle(3), logger=None)
     assert engine.discover_count("(SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES)", max_count=64) == 3
+
+
+def test_extract_cancel_returns_partial():
+    import threading
+    from blindsqli.result_types import OracleObservation, OracleResult
+
+    token = threading.Event()
+
+    class CancelingOracle(FakeOracle):
+        def __init__(self, secret, tok, after):
+            super().__init__(secret)
+            self.tok = tok
+            self.after = after
+        def ask(self, condition):
+            obs = super().ask(condition)
+            if self.requests_completed >= self.after:
+                self.tok.set()   # simulate a Ctrl+C partway through
+            return obs
+
+    oracle = CancelingOracle("jun_users_table", token, after=20)
+    engine = ExfiltrationEngine(Config(verbosity=0, strategy="binary"), oracle,
+                                logger=None, cancel_token=token)
+    result = engine.extract(make_target())
+    assert result.cancelled is True
+    assert result.complete is False
+    # whatever was recovered is a correct prefix of the true value
+    assert "jun_users_table".startswith(result.value)
+    assert len(result.value) < len("jun_users_table")
+    assert "stopped by user before completion" in result.notes
+
+
+def test_discover_count_cancel_returns_none():
+    import threading
+    token = threading.Event()
+    token.set()
+
+    class NeverOracle(FakeOracle):
+        pass
+
+    engine = ExfiltrationEngine(Config(verbosity=0), NeverOracle("x"),
+                                logger=None, cancel_token=token)
+    assert engine.discover_count("(SELECT COUNT(*) FROM t)", max_count=64) is None

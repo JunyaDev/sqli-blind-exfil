@@ -336,6 +336,19 @@ python -m blindsqli extract --url http://host/api --method POST \
   --content-type application/json --preset first-table
 ```
 
+## Stopping early
+
+A run can be stopped at any time with **Ctrl+C**, even far from completion:
+
+- **First Ctrl+C** asks the engine to stop cleanly at the next checkpoint. It
+  finishes safely, keeps everything recovered so far, writes the output file
+  (with `"cancelled": true` / `"stopped": true` and the partial value), and for
+  `enumerate` keeps the rows already collected. Exit code is 1.
+- **Second Ctrl+C** force-quits immediately (exit 130); partial progress from
+  the in-flight step is not saved.
+
+Fully-recovered values are still written to `--knowledge`; partial ones are not.
+
 ## Reliability model
 
 Every oracle question resolves to one of:

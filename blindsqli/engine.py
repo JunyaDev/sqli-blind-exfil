@@ -24,6 +24,7 @@ requests finish out of order.
 from __future__ import annotations
 
 import math
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -48,6 +49,7 @@ class ExtractionResult:
     undetermined_at: Optional[int] = None
     requests_completed: int = 0
     requests_failed: int = 0
+    cancelled: bool = False
     notes: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -58,6 +60,7 @@ class ExtractionResult:
             "length": self.length,
             "truncated": self.truncated,
             "undetermined_at": self.undetermined_at,
+            "cancelled": self.cancelled,
             "requests_completed": self.requests_completed,
             "requests_failed": self.requests_failed,
             "notes": self.notes,
@@ -73,11 +76,13 @@ class ExfiltrationEngine:
         seq_predictor: Optional[SequencePredictor] = None,
         logger: Optional[Logger] = None,
         reporter: Optional[Reporter] = None,
+        cancel_token: Optional[threading.Event] = None,
     ) -> None:
         self.config = config
         self.oracle = oracle
         self.logger = logger or Logger(config.verbosity)
         self.reporter = reporter or NullReporter()
+        self._cancel = cancel_token or threading.Event()
         self.char_predictor = char_predictor or CharacterPredictor(
             config.charset, order=config.predictor_order
         )
@@ -87,6 +92,13 @@ class ExfiltrationEngine:
         self.ordered_charset = sorted(set(config.charset))
         # running estimate of requests spent per character, for the cost model
         self._req_per_char = max(1.0, math.log2(max(2, len(self.ordered_charset))))
+
+    def request_cancel(self) -> None:
+        """Ask extraction to stop cleanly at the next checkpoint."""
+        self._cancel.set()
+
+    def cancelled(self) -> bool:
+        return self._cancel.is_set()
 
     # ------------------------------------------------------------- public API
     def extract(self, target: Target) -> ExtractionResult:
@@ -105,6 +117,9 @@ class ExfiltrationEngine:
 
         with ThreadPoolExecutor(max_workers=self.config.workers) as pool:
             while True:
+                if self._cancel.is_set():
+                    self.logger.info(f"cancelled; stopping with partial value {value!r}")
+                    break
                 if length is not None and len(value) >= length:
                     break
                 if length is None and len(value) >= self.config.max_length:
@@ -137,13 +152,15 @@ class ExfiltrationEngine:
                     self.char_predictor.learn_transition(value[: len(value) - len(accepted) + i], ch)
                 self._report(target, pos, value, cand, oracle_str, conf, length)
 
-        complete = undetermined is None and not truncated and (
-            length is None or len(value) == length
+        cancelled = self._cancel.is_set()
+        complete = (
+            undetermined is None and not truncated and not cancelled
+            and (length is None or len(value) == length)
         )
         # feed the finished value into both predictors for future targets
         self.char_predictor.learn_value(value)
         self.seq_predictor.learn_value(value)
-        return self._finish(target, value, complete, length, truncated, undetermined)
+        return self._finish(target, value, complete, length, truncated, undetermined, cancelled)
 
     # --------------------------------------------------------------- count
     def discover_count(self, count_expr: str, max_count: int = 4096) -> Optional[int]:
@@ -153,12 +170,18 @@ class ExfiltrationEngine:
         before extracting each. Returns None if a probe is undetermined.
         """
         self.oracle.ensure_classifier()
+        if self._cancel.is_set():
+            self.logger.info("cancelled before count discovery")
+            return None
         hi = max_count
         if self._is_true(f"{count_expr} <= {hi}") is not True:
             self.logger.error(f"count exceeds max_count={hi}")
             return hi
         lo = 0
         while lo < hi:
+            if self._cancel.is_set():
+                self.logger.info("cancelled during count discovery")
+                return None
             mid = (lo + hi) // 2
             res = self._is_true(f"{count_expr} <= {mid}")
             if res is True:
@@ -354,7 +377,8 @@ class ExfiltrationEngine:
             )
         )
 
-    def _finish(self, target, value, complete, length, truncated=False, undetermined=None) -> ExtractionResult:
+    def _finish(self, target, value, complete, length, truncated=False,
+                undetermined=None, cancelled=False) -> ExtractionResult:
         result = ExtractionResult(
             target=target.name,
             value=value,
@@ -362,6 +386,7 @@ class ExfiltrationEngine:
             length=length,
             truncated=truncated,
             undetermined_at=undetermined,
+            cancelled=cancelled,
             requests_completed=self.oracle.requests_completed,
             requests_failed=self.oracle.requests_failed,
         )
@@ -369,5 +394,7 @@ class ExfiltrationEngine:
             result.notes.append(f"stopped at max_length={self.config.max_length}")
         if undetermined is not None:
             result.notes.append(f"undetermined character at position {undetermined}")
+        if cancelled:
+            result.notes.append("stopped by user before completion")
         self.reporter.result(target.name, value, complete)
         return result

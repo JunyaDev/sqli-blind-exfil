@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
 from typing import Optional
 
@@ -200,6 +201,36 @@ def _distinguishers(ok, err) -> list:
     return d
 
 
+class _GracefulStop:
+    """Ctrl+C once -> ask the engine to stop cleanly after the current step
+    (partial result is kept and saved). Ctrl+C twice -> force quit."""
+
+    def __init__(self, engine, logger: Logger) -> None:
+        self.engine = engine
+        self.logger = logger
+        self._old = None
+
+    def __enter__(self) -> "_GracefulStop":
+        try:
+            self._old = signal.signal(signal.SIGINT, self._handle)
+        except ValueError:  # not the main thread (e.g. under tests)
+            self._old = None
+        return self
+
+    def _handle(self, signum, frame) -> None:
+        if self.engine.cancelled():
+            raise KeyboardInterrupt  # second Ctrl+C -> force
+        self.logger.error("stopping after the current step... (Ctrl+C again to force quit)")
+        self.engine.request_cancel()
+
+    def __exit__(self, *exc) -> None:
+        if self._old is not None:
+            try:
+                signal.signal(signal.SIGINT, self._old)
+            except ValueError:
+                pass
+
+
 def cmd_extract(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
     reporter = NullReporter() if cfg.verbosity == 0 else TerminalReporter(verbosity=cfg.verbosity)
     oracle = BooleanOracle(cfg, logger=logger)
@@ -215,12 +246,14 @@ def cmd_extract(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
     logger.info(f"Extracting {target.name} from {cfg.target_url}")
     logger.verbose(f"target expression: {target.expression}")
     try:
-        result = engine.extract(target)
+        with _GracefulStop(engine, logger):
+            result = engine.extract(target)
     except CalibrationError as exc:
         logger.error(f"calibration failed: {exc}")
         return 2
 
-    if cfg.knowledge_file and result.value:
+    # only persist a fully-recovered value to the knowledge base
+    if cfg.knowledge_file and result.value and result.complete:
         merged = save_knowledge(cfg.knowledge_file, known + [result.value])
         logger.info(f"knowledge file now holds {len(merged)} unique values")
 
@@ -293,39 +326,54 @@ def cmd_enumerate(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
         row = lambda i: targets_mod.first_table_name(dialect, offset=i, database=database)
 
     logger.info(f"Enumerating {what} from {cfg.target_url}")
-    try:
-        total = engine.discover_count(count_expr, max_count=getattr(args, "max_count", 4096))
-    except CalibrationError as exc:
-        logger.error(f"calibration failed: {exc}")
-        return 2
-    if total is None:
-        logger.error("could not determine the row count")
-        return 2
-    if getattr(args, "limit", 0):
-        total = min(total, args.limit)
-    logger.info(f"{total} {what} to extract")
-
     rows = []
     all_complete = True
-    for i in range(total):
-        result = engine.extract(row(i))
-        rows.append({
-            "offset": i, "value": result.value, "complete": result.complete,
-            "already_known": result.value in known_set,
-        })
-        all_complete = all_complete and result.complete
-        tag = " (already known)" if result.value in known_set else ""
-        logger.info(f"[{i}] {result.value!r}{'' if result.complete else ' (partial)'}{tag}")
+    stopped = False
+    with _GracefulStop(engine, logger):
+        try:
+            total = engine.discover_count(count_expr, max_count=getattr(args, "max_count", 4096))
+        except CalibrationError as exc:
+            logger.error(f"calibration failed: {exc}")
+            return 2
+        if total is None:
+            if engine.cancelled():
+                logger.error("stopped by user during count discovery")
+                return 130
+            logger.error("could not determine the row count")
+            return 2
+        if getattr(args, "limit", 0):
+            total = min(total, args.limit)
+        logger.info(f"{total} {what} to extract")
 
+        for i in range(total):
+            if engine.cancelled():
+                stopped = True
+                logger.error(f"stopped by user after {len(rows)} of {total} {what}")
+                break
+            result = engine.extract(row(i))
+            rows.append({
+                "offset": i, "value": result.value, "complete": result.complete,
+                "already_known": result.value in known_set,
+            })
+            all_complete = all_complete and result.complete
+            if result.cancelled:
+                stopped = True
+            tag = " (already known)" if result.value in known_set else ""
+            logger.info(f"[{i}] {result.value!r}{'' if result.complete else ' (partial)'}{tag}")
+
+    # only persist fully-recovered values to the knowledge base
     values = [r["value"] for r in rows]
-    if cfg.knowledge_file:
-        merged = save_knowledge(cfg.knowledge_file, list(known) + values)
+    complete_values = [r["value"] for r in rows if r["complete"]]
+    if cfg.knowledge_file and complete_values:
+        merged = save_knowledge(cfg.knowledge_file, list(known) + complete_values)
         logger.info(f"knowledge file now holds {len(merged)} unique values")
 
     out = {
         "what": what,
         "table": getattr(args, "table", None),
         "count": total,
+        "extracted": len(rows),
+        "stopped": stopped,
         "values": values,
         "unique_values": sorted(set(values)),
         "new_values": sorted(set(values) - known_set),
@@ -335,9 +383,9 @@ def cmd_enumerate(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
     }
     with open(cfg.output_file, "w", encoding="utf-8") as fh:
         json.dump(out, fh, indent=2)
-    logger.info(f"wrote {cfg.output_file}")
+    logger.info(f"wrote {cfg.output_file} ({len(rows)} of {total} {what})")
     print(json.dumps(out, indent=2))
-    return 0 if all_complete else 1
+    return 0 if (all_complete and not stopped) else 1
 
 
 # ----------------------------------------------------------------- entry
@@ -368,6 +416,9 @@ def main(argv: Optional[list] = None) -> int:
     except ScopeError as exc:
         print(f"scope error: {exc}", file=sys.stderr)
         return 3
+    except KeyboardInterrupt:
+        print("aborted (force quit); partial progress was not saved", file=sys.stderr)
+        return 130
     parser.error(f"unknown command {args.command}")
     return 2
 
