@@ -1,0 +1,21 @@
+# virtualenv
+.venv/
+venv/
+
+# python caches / build
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# tool run outputs
+exfil_result.json
+first_table.json
+*_result.json
+
+# editor / OS
+.idea/
+.vscode/
+.DS_Store

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blindsqli"
+version = "0.1.0"
+description = "Boolean/error-based blind SQL injection exfiltration tool for a local training lab"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["requests>=2.25"]
+
+[project.optional-dependencies]
+yaml = ["PyYAML>=5.4"]
+dev = ["pytest>=7.0", "PyYAML>=5.4"]
+
+[project.scripts]
+blindsqli = "blindsqli.cli:main"
+
+[tool.setuptools]
+packages = ["blindsqli"]
+py-modules = ["mock_target"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

