@@ -50,6 +50,10 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--retries", dest="max_retries", type=int)
         sp.add_argument("--workers", dest="workers", type=int)
         sp.add_argument("--dialect", dest="dialect")
+        sp.add_argument("--collation", dest="collation",
+                        help="override SQL comparison collation (MSSQL default: Latin1_General_BIN)")
+        sp.add_argument("--no-collation", dest="collation", action="store_const", const="",
+                        help="disable the COLLATE clause on comparisons (if the default is unsupported)")
         sp.add_argument("--proxy", dest="proxy",
                         help="route all requests through this proxy, e.g. http://127.0.0.1:8080")
         sp.add_argument("--proxy-insecure", dest="proxy_insecure",
@@ -97,7 +101,7 @@ def _apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
         "target_url", "http_method", "injection_param", "base_payload",
         "request_timeout", "max_retries", "workers", "dialect", "charset",
         "max_length", "strategy", "discover_length", "target_name",
-        "target_expression", "output_file", "allow_nonlocal",
+        "target_expression", "output_file", "allow_nonlocal", "collation",
         "proxy", "proxy_insecure", "body_mode", "body_template", "content_type",
     ]
     for f in fields:
@@ -123,6 +127,9 @@ def _apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
 
 def _build_target(cfg: Config, args: argparse.Namespace):
     dialect = get_dialect(cfg.dialect)
+    if cfg.collation is not None:
+        # "" -> disable COLLATE; a name -> use it; None -> keep dialect default
+        dialect.collation = cfg.collation or None
     preset = getattr(args, "preset", None)
     if preset == "first-table":
         return targets_mod.first_table_name(dialect)

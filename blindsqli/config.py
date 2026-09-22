@@ -110,6 +110,11 @@ class Config:
     target_name: str = "TABLE_NAME"
     target_expression: str = "(SELECT TOP(1) TABLE_NAME FROM INFORMATION_SCHEMA.TABLES)"
     dialect: str = "mssql"
+    # Override the SQL comparison collation. None = use the dialect default
+    # (MSSQL forces a binary, case-sensitive collation so ordering/case are
+    # exact). "" disables the COLLATE clause entirely (use if the default
+    # collation name is not valid on the target).
+    collation: Optional[str] = None
 
     # --- classifier ---------------------------------------------------------
     classifier: ClassifierConfig = field(default_factory=ClassifierConfig)

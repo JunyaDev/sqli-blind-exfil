@@ -101,3 +101,24 @@ def test_config_flag_absent_is_none():
     parser = build_parser()
     args = parser.parse_args(["extract"])
     assert args.config is None
+
+
+def test_collation_flags():
+    parser = build_parser()
+    assert parser.parse_args(["extract", "--no-collation"]).collation == ""
+    assert parser.parse_args(["extract", "--collation", "SQL_X"]).collation == "SQL_X"
+    assert parser.parse_args(["extract"]).collation is None
+
+
+def test_build_target_applies_collation():
+    from argparse import Namespace
+    from blindsqli.cli import _build_target
+    # disable
+    t = _build_target(Config(collation=""), Namespace(preset=None))
+    assert "COLLATE" not in t.char_is(1, "a")
+    # default keeps MSSQL binary collation
+    t2 = _build_target(Config(collation=None), Namespace(preset=None))
+    assert "COLLATE Latin1_General_BIN" in t2.char_is(1, "a")
+    # custom name
+    t3 = _build_target(Config(collation="SQL_Latin1_General_CP1_CS_AS"), Namespace(preset=None))
+    assert "COLLATE SQL_Latin1_General_CP1_CS_AS" in t3.char_is(1, "a")

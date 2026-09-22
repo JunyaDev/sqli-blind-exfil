@@ -96,3 +96,22 @@ def test_predictor_reduces_requests():
     assert result.value == "jun_users"
     # naive worst case would be ~ len(charset) * 9; assert we are far below
     assert oracle.requests_completed < len(Config().charset) * 9
+
+
+def test_binary_search_falls_back_to_linear_on_ordering_mismatch():
+    # Simulate a target whose '<=' comparisons never work (e.g. an unsupported
+    # collation makes them error -> read as FALSE) while equality still works.
+    # Binary search misconverges; the linear equality fallback must recover.
+    class OrderingBrokenOracle(FakeOracle):
+        def ask(self, condition):
+            if "SUBSTRING" in condition and "<=" in condition:
+                with self._lock:
+                    self.requests_completed += 1
+                return OracleObservation(condition, OracleResult.FALSE, 1)
+            return super().ask(condition)
+
+    oracle = OrderingBrokenOracle(secret="s")
+    cfg = Config(verbosity=0, strategy="binary", charset="abcstz", max_length=4)
+    result = ExfiltrationEngine(cfg, oracle, logger=None).extract(make_target())
+    assert result.value == "s"
+    assert result.complete is True

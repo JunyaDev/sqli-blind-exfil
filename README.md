@@ -309,6 +309,22 @@ end. Tests that need `requests` are skipped automatically if it is absent.
 
 ---
 
+## Troubleshooting
+
+**"binary search converged on 'z' … verification failed"** (or any character
+that comes out wrong). In error-based blind SQLi an *invalid* SQL condition
+returns the error page too, so a malformed comparison is read as FALSE and the
+search drifts to the end of the charset. The tool now falls back to an
+order-independent equality scan automatically, but if that also fails the
+condition is genuinely not valid for the target. Usual causes and fixes:
+
+- **Wrong dialect.** The default is MSSQL. If the backend is MySQL/Postgres,
+  pass `--dialect mysql` / `--dialect postgres`.
+- **Unsupported collation.** MSSQL comparisons are forced to
+  `COLLATE Latin1_General_BIN` for exact case/order. If that collation name is
+  not valid on the target, pass `--no-collation` (or `--collation <name>`).
+- **Character outside the charset.** Widen `--charset`.
+
 ## Safety and scope
 
 - Targets are checked against a loopback allowlist. Non-local hosts are refused
