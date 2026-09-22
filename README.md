@@ -325,6 +325,15 @@ condition is genuinely not valid for the target. Usual causes and fixes:
   not valid on the target, pass `--no-collation` (or `--collation <name>`).
 - **Character outside the charset.** Widen `--charset`.
 
+**Both true and false return the same status; only Content-Length differs, but
+the search skips the right character.** If the page **echoes the submitted
+payload**, a longer extraction payload inflates the body and skews a raw length
+comparison, so a true response is misread as false. The classifier strips the
+sent payload (raw, URL-encoded and HTML-escaped forms) from the body before
+measuring length and markers, so only the genuine true/false difference counts.
+If your target reflects the payload in some other encoding, pin an explicit
+`error_body_signatures` in the config instead.
+
 ## Safety and scope
 
 - Targets are checked against a loopback allowlist. Non-local hosts are refused

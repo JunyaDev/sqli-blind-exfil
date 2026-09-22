@@ -117,3 +117,24 @@ def test_signature_classifier_both_error_with_dynamic_noise():
     assert clf is not None
     assert clf.classify(html(500, "x Conversion failed token=91733 y")).verdict is Verdict.ERROR
     assert clf.classify(html(500, "x Divide by zero at 12:00:01 y")).verdict is Verdict.OK
+
+
+# --- reflection removal (payload echoed in the body) ------------------------
+
+def test_strip_reflection_removes_raw_and_encoded():
+    from blindsqli.classifier import strip_reflection
+    body = "q=abc'--x and encoded q%3Dabc%27--"
+    out = strip_reflection(body, "abc'--")
+    assert "abc'--" not in out
+    assert "abc%27--" not in out
+
+
+def test_baseline_length_survives_payload_echo():
+    # Both 500; the body echoes the sent payload, so raw length tracks payload
+    # size. With reflection removal the true/false length signal is recovered.
+    ok = html(500, "OK" + "P" * 3)          # ok base "OK", cal payload "PPP"
+    err = html(500, "ERRERR" + "P" * 3)     # error base is longer
+    clf = BaselineClassifier(ok, err, ok_sent="P" * 3, error_sent="P" * 3)
+    long_sent = "Q" * 60                     # a much longer extraction payload
+    assert clf.classify(html(500, "OK" + long_sent), sent=long_sent).verdict is Verdict.OK
+    assert clf.classify(html(500, "ERRERR" + long_sent), sent=long_sent).verdict is Verdict.ERROR

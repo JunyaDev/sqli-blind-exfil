@@ -63,6 +63,8 @@ class BooleanOracle:
     def calibrate(self) -> None:
         """Learn OK/ERROR fingerprints from a true and a false probe."""
         self.logger.info("Calibrating classifier from known-true/known-false probes...")
+        ok_sent = self.payload.build("1=1")
+        err_sent = self.payload.build("1=2")
         ok_resp = self._raw("1=1")
         err_resp = self._raw("1=2")
         if ok_resp is None or err_resp is None:
@@ -78,7 +80,8 @@ class BooleanOracle:
                 "channel). Inspect the target and adjust base_payload / param."
             )
         self.classifier = BaselineClassifier(
-            ok=ok_resp, error=err_resp, length_tolerance=self.config.classifier.length_tolerance
+            ok=ok_resp, error=err_resp, length_tolerance=self.config.classifier.length_tolerance,
+            ok_sent=ok_sent, error_sent=err_sent,
         )
         self.logger.info(
             f"Calibrated: OK(status={ok_resp.status},len={ok_resp.length}) "
@@ -143,7 +146,7 @@ class BooleanOracle:
                     return OracleObservation(condition, OracleResult.REQUEST_ERROR, attempts, error=last_error)
                 continue
 
-            decision = self.classifier.classify(resp)
+            decision = self.classifier.classify(resp, sent=value)
             self.logger.debug(
                 f"ask[{condition}] attempt {attempts} -> {decision.verdict.value}: {decision.reason}"
             )

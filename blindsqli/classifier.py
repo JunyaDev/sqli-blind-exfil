@@ -16,13 +16,43 @@ from __future__ import annotations
 
 import re
 from typing import List, Optional, Sequence
+from urllib.parse import quote
 
 from .config import ClassifierConfig
 from .result_types import ClassifierDecision, HttpResponse, Verdict
 
 
+def strip_reflection(body: str, sent: Optional[str]) -> str:
+    """Remove occurrences of the injected payload (and common encodings of it)
+    from *body*.
+
+    Many targets echo the submitted query/parameter back in the response, so a
+    longer payload yields a longer body. That reflection would otherwise make
+    body length track the payload length instead of the true/false signal,
+    which breaks length-based classification. Removing it normalizes the body so
+    only the genuine true/false difference remains.
+    """
+    if not sent:
+        return body
+    variants = [sent]
+    try:
+        variants.append(quote(sent))
+        variants.append(quote(sent, safe=""))
+    except Exception:  # pragma: no cover - defensive
+        pass
+    # HTML-escaped form (common when reflected into an HTML page)
+    variants.append(
+        sent.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        .replace('"', "&quot;").replace("'", "&#39;")
+    )
+    for v in variants:
+        if v:
+            body = body.replace(v, "")
+    return body
+
+
 class BaseClassifier:
-    def classify(self, response: HttpResponse) -> ClassifierDecision:  # pragma: no cover
+    def classify(self, response: HttpResponse, sent: Optional[str] = None) -> ClassifierDecision:  # pragma: no cover
         raise NotImplementedError
 
 
@@ -31,7 +61,7 @@ class StatusClassifier(BaseClassifier):
         self.error_status = set(error_status)
         self.ok_status = set(ok_status)
 
-    def classify(self, response: HttpResponse) -> ClassifierDecision:
+    def classify(self, response: HttpResponse, sent=None) -> ClassifierDecision:
         if response.status in self.error_status:
             return ClassifierDecision(Verdict.ERROR, f"status {response.status} in error set")
         if response.status in self.ok_status:
@@ -52,7 +82,7 @@ class SignatureClassifier(BaseClassifier):
         self.ok_body = [re.compile(p, re.IGNORECASE | re.DOTALL) for p in ok_body]
         self.error_headers = {k.lower(): re.compile(v, re.I) for k, v in (error_headers or {}).items()}
 
-    def classify(self, response: HttpResponse) -> ClassifierDecision:
+    def classify(self, response: HttpResponse, sent=None) -> ClassifierDecision:
         for rx in self.error_body:
             if rx.search(response.body):
                 return ClassifierDecision(Verdict.ERROR, f"body matched error signature /{rx.pattern}/")
@@ -73,7 +103,7 @@ class LengthClassifier(BaseClassifier):
         self.threshold = threshold
         self.shorter_is_error = shorter_is_error
 
-    def classify(self, response: HttpResponse) -> ClassifierDecision:
+    def classify(self, response: HttpResponse, sent=None) -> ClassifierDecision:
         short = response.length < self.threshold
         is_error = short if self.shorter_is_error else not short
         verdict = Verdict.ERROR if is_error else Verdict.OK
@@ -88,7 +118,7 @@ class TimingClassifier(BaseClassifier):
     def __init__(self, threshold: float) -> None:
         self.threshold = threshold
 
-    def classify(self, response: HttpResponse) -> ClassifierDecision:
+    def classify(self, response: HttpResponse, sent=None) -> ClassifierDecision:
         if response.elapsed >= self.threshold:
             return ClassifierDecision(Verdict.ERROR, f"elapsed {response.elapsed:.3f}s >= {self.threshold}s")
         return ClassifierDecision(Verdict.OK, f"elapsed {response.elapsed:.3f}s < {self.threshold}s")
@@ -105,10 +135,10 @@ class CompositeClassifier(BaseClassifier):
         self.classifiers = list(classifiers)
         self.default = default
 
-    def classify(self, response: HttpResponse) -> ClassifierDecision:
+    def classify(self, response: HttpResponse, sent=None) -> ClassifierDecision:
         votes = {}
         for clf in self.classifiers:
-            decision = clf.classify(response)
+            decision = clf.classify(response, sent)
             votes[type(clf).__name__] = decision.verdict.value
             if decision.verdict is not Verdict.UNKNOWN:
                 decision.votes = votes
@@ -124,12 +154,20 @@ class BaselineClassifier(BaseClassifier):
     diffed body signature. This is what runs when you don't hand-write rules.
     """
 
-    def __init__(self, ok: HttpResponse, error: HttpResponse, length_tolerance: int = 0) -> None:
+    def __init__(self, ok: HttpResponse, error: HttpResponse, length_tolerance: int = 0,
+                 ok_sent: Optional[str] = None, error_sent: Optional[str] = None) -> None:
         self.ok = ok
         self.error = error
         self.length_tolerance = length_tolerance
-        self._error_marker = self._diff_marker(error.body, ok.body)
-        self._ok_marker = self._diff_marker(ok.body, error.body)
+        # Reflection-normalized bodies: strip each sample's own payload so the
+        # calibrated lengths/markers reflect the true/false difference only, not
+        # the length of the probe payload.
+        self._ok_body = strip_reflection(ok.body, ok_sent)
+        self._error_body = strip_reflection(error.body, error_sent)
+        self._ok_len = len(self._ok_body)
+        self._error_len = len(self._error_body)
+        self._error_marker = self._diff_marker(self._error_body, self._ok_body)
+        self._ok_marker = self._diff_marker(self._ok_body, self._error_body)
 
     @staticmethod
     def _diff_marker(a: str, b: str, span: int = 60) -> Optional[str]:
@@ -143,7 +181,10 @@ class BaselineClassifier(BaseClassifier):
                 return line[:span]
         return None
 
-    def classify(self, response: HttpResponse) -> ClassifierDecision:
+    def classify(self, response: HttpResponse, sent: Optional[str] = None) -> ClassifierDecision:
+        body = strip_reflection(response.body, sent)
+        length = len(body)
+
         # 1) Distinct status codes are the strongest signal.
         if self.ok.status != self.error.status:
             if response.status == self.error.status:
@@ -151,19 +192,19 @@ class BaselineClassifier(BaseClassifier):
             if response.status == self.ok.status:
                 return ClassifierDecision(Verdict.OK, f"status matches calibrated ok {self.ok.status}")
 
-        # 2) Distinctive body markers.
-        if self._error_marker and self._error_marker in response.body:
+        # 2) Distinctive body markers (on reflection-normalized bodies).
+        if self._error_marker and self._error_marker in body:
             return ClassifierDecision(Verdict.ERROR, f"body contains calibrated error marker {self._error_marker!r}")
-        if self._ok_marker and self._ok_marker in response.body:
+        if self._ok_marker and self._ok_marker in body:
             return ClassifierDecision(Verdict.OK, f"body contains calibrated ok marker {self._ok_marker!r}")
 
-        # 3) Body length nearest-neighbour.
-        d_ok = abs(response.length - self.ok.length)
-        d_err = abs(response.length - self.error.length)
+        # 3) Body length nearest-neighbour (reflection-normalized).
+        d_ok = abs(length - self._ok_len)
+        d_err = abs(length - self._error_len)
         if d_ok != d_err:
             if d_err < d_ok:
-                return ClassifierDecision(Verdict.ERROR, f"length {response.length} closer to error {self.error.length}")
-            return ClassifierDecision(Verdict.OK, f"length {response.length} closer to ok {self.ok.length}")
+                return ClassifierDecision(Verdict.ERROR, f"normalized length {length} closer to error {self._error_len}")
+            return ClassifierDecision(Verdict.OK, f"normalized length {length} closer to ok {self._ok_len}")
 
         return ClassifierDecision(Verdict.UNKNOWN, "response resembles neither calibrated sample")
 

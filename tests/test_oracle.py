@@ -52,7 +52,7 @@ def test_calibration_detects_no_side_channel():
 
 
 class AlwaysUnknown(BaseClassifier):
-    def classify(self, response):
+    def classify(self, response, sent=None):
         return ClassifierDecision(Verdict.UNKNOWN, "cannot tell")
 
 
@@ -145,3 +145,23 @@ def test_oracle_dynamic_error_is_unknown_not_false():
     assert obs.result is OracleResult.UNKNOWN
     assert obs.result is not OracleResult.FALSE
     assert obs.attempts == 3  # 1 + 2 ambiguous retries
+
+
+def _reflect_behaviour(secret):
+    """Both branches 500; body echoes the sent payload (so length tracks the
+    payload length) and differs only by a fixed base string."""
+    def behave(value):
+        cond = extract_condition(value)
+        is_true = cond is not None and evaluate_condition(cond, secret)
+        base = "<pre>TRUEBODY</pre>" if is_true else "<pre>FALSE-BODY-LONGER</pre>"
+        return html(500, base + value)  # + value == reflected payload
+    return behave
+
+
+def test_oracle_length_signal_survives_reflection():
+    cfg = Config(ambiguous_retries=0, retry_backoff=0.0)
+    o = BooleanOracle(cfg, http=ScriptedHttpClient(_reflect_behaviour("jun_users")),
+                      classifier=None)
+    o.calibrate()  # both 500, differ only in base string; body echoes payload
+    assert o.test("SUBSTRING(x,1,4) = 'jun_'") is OracleResult.TRUE
+    assert o.test("SUBSTRING(x,1,4) = 'zzzz'") is OracleResult.FALSE
