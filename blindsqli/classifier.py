@@ -170,15 +170,39 @@ class BaselineClassifier(BaseClassifier):
         self._ok_marker = self._diff_marker(self._ok_body, self._error_body)
 
     @staticmethod
-    def _diff_marker(a: str, b: str, span: int = 60) -> Optional[str]:
-        """A short substring present in *a* but not *b*, if any."""
-        # Find first line in a not present in b; cheap and effective for
-        # error pages that add a stack-trace / message line.
-        b_lines = set(b.splitlines())
+    def _diff_marker(a: str, b: str, span: int = 120) -> Optional[str]:
+        """A substring genuinely exclusive to *a* (absent from *b*), or None.
+
+        The old line-based approach broke on single-line (JSON) bodies: it
+        returned the first 60 chars of *a*, which for two bodies that share a
+        long prefix is just that shared prefix -- present in *b* too, so it
+        matched everything. Instead, trim the common prefix and suffix and take
+        the region unique to *a*, and only return it if it is truly not a
+        substring of *b*.
+        """
+        if not a:
+            return None
+        # length of the common prefix
+        n = min(len(a), len(b))
+        i = 0
+        while i < n and a[i] == b[i]:
+            i += 1
+        # length of the common suffix, not overlapping the prefix
+        ja, jb = len(a), len(b)
+        while ja > i and jb > i and a[ja - 1] == b[jb - 1]:
+            ja -= 1
+            jb -= 1
+        mid = a[i:ja].strip()
+        if len(mid) >= 3:
+            for cand in (mid[:span], mid):
+                if cand and cand not in b:
+                    return cand
+        # fall back to a whole line of a that never appears in b
         for line in a.splitlines():
-            line = line.strip()
-            if len(line) >= 4 and line not in b_lines and line in a:
-                return line[:span]
+            s = line.strip()
+            if len(s) >= 4 and s not in b:
+                cand = s[:span]
+                return cand if cand not in b else s
         return None
 
     def classify(self, response: HttpResponse, sent: Optional[str] = None) -> ClassifierDecision:

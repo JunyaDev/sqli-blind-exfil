@@ -138,3 +138,24 @@ def test_baseline_length_survives_payload_echo():
     long_sent = "Q" * 60                     # a much longer extraction payload
     assert clf.classify(html(500, "OK" + long_sent), sent=long_sent).verdict is Verdict.OK
     assert clf.classify(html(500, "ERRERR" + long_sent), sent=long_sent).verdict is Verdict.ERROR
+
+
+def test_baseline_single_line_json_shared_prefix():
+    # Single-line JSON bodies (both HTTP 500) that share a long identical prefix
+    # and differ only later. The old marker logic returned the shared prefix and
+    # matched every response as ERROR; the fix must classify by the real diff.
+    prefix = '{"cause":null,"stackTrace":[],"businessError":"B","application":"svc",'
+    ok = html(500, prefix + '"detail":"OK_LONGER_RESULT_PADDING"}')   # TRUE, longer
+    err = html(500, prefix + '"detail":"FAIL"}')                       # FALSE, shorter
+    clf = BaselineClassifier(ok, err)
+    # a genuine TRUE response must not be stamped ERROR by a shared-prefix marker
+    assert clf.classify(html(500, prefix + '"detail":"OK_LONGER_RESULT_PADDING"}')).verdict is Verdict.OK
+    assert clf.classify(html(500, prefix + '"detail":"FAIL"}')).verdict is Verdict.ERROR
+
+
+def test_diff_marker_never_returns_shared_prefix():
+    a = "COMMONPREFIX_that_is_quite_long___AAA_tail"
+    b = "COMMONPREFIX_that_is_quite_long___BBB_tail"
+    m = BaselineClassifier._diff_marker(a, b)
+    assert m is not None and m not in b   # exclusive to a
+    assert "AAA" in m
