@@ -122,6 +122,10 @@ class Config:
     # --- logging / output ---------------------------------------------------
     verbosity: int = 1  # 0 quiet, 1 normal, 2 verbose, 3 debug
     output_file: str = "exfil_result.json"
+    # Persistent JSON set of previously-extracted values: loaded to seed
+    # prediction (so known values are confirmed in ~1 request) and updated
+    # (deduplicated) after the run. None disables it.
+    knowledge_file: Optional[str] = None
 
     # ------------------------------------------------------------------------
     @staticmethod

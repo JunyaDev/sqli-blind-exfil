@@ -23,6 +23,7 @@ from .logging_util import Logger
 from .oracle import BooleanOracle, CalibrationError
 from .predictor import CharacterPredictor
 from .sequence import SequencePredictor
+from .knowledge import load_knowledge, save_knowledge, seed_predictors
 from .reporting import NullReporter, TerminalReporter
 from .scope import ScopeError
 from . import targets as targets_mod
@@ -76,6 +77,9 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--i-have-authorization", dest="allow_nonlocal",
                         action="store_true", default=None,
                         help="permit a non-local target (you assert you are authorized)")
+        sp.add_argument("--knowledge", dest="knowledge_file",
+                        help="JSON file of previously-extracted values: seeds prediction "
+                             "and is updated (deduplicated) after the run")
 
     ex = sub.add_parser("extract", help="extract a target value")
     add_common(ex)
@@ -116,6 +120,7 @@ def _apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
         "max_length", "strategy", "discover_length", "target_name",
         "target_expression", "output_file", "allow_nonlocal", "collation",
         "proxy", "proxy_insecure", "body_mode", "body_template", "content_type",
+        "knowledge_file",
     ]
     for f in fields:
         val = getattr(args, f, None)
@@ -184,8 +189,13 @@ def cmd_extract(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
     reporter = NullReporter() if cfg.verbosity == 0 else TerminalReporter(verbosity=cfg.verbosity)
     oracle = BooleanOracle(cfg, logger=logger)
     predictor = CharacterPredictor(cfg.charset, order=cfg.predictor_order)
+    seqp = SequencePredictor(min_prefix=cfg.min_seq_prefix)
+    known = load_knowledge(cfg.knowledge_file)
+    if known:
+        seed_predictors(predictor, seqp, known)
+        logger.info(f"loaded {len(known)} known values from {cfg.knowledge_file}")
     engine = ExfiltrationEngine(cfg, oracle, char_predictor=predictor,
-                                logger=logger, reporter=reporter)
+                                seq_predictor=seqp, logger=logger, reporter=reporter)
     target = _build_target(cfg, args)
     logger.info(f"Extracting {target.name} from {cfg.target_url}")
     logger.verbose(f"target expression: {target.expression}")
@@ -195,7 +205,12 @@ def cmd_extract(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
         logger.error(f"calibration failed: {exc}")
         return 2
 
+    if cfg.knowledge_file and result.value:
+        merged = save_knowledge(cfg.knowledge_file, known + [result.value])
+        logger.info(f"knowledge file now holds {len(merged)} unique values")
+
     out = result.to_dict()
+    out["already_known"] = result.value in known
     with open(cfg.output_file, "w", encoding="utf-8") as fh:
         json.dump(out, fh, indent=2)
     logger.info(f"wrote {cfg.output_file}")
@@ -206,10 +221,15 @@ def cmd_extract(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
 def cmd_enumerate(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
     reporter = NullReporter() if cfg.verbosity == 0 else TerminalReporter(verbosity=cfg.verbosity)
     oracle = BooleanOracle(cfg, logger=logger)
+    predictor = CharacterPredictor(cfg.charset, order=cfg.predictor_order)
+    seqp = SequencePredictor(min_prefix=cfg.min_seq_prefix)
+    known = load_knowledge(cfg.knowledge_file)
+    if known:
+        seed_predictors(predictor, seqp, known)
+        logger.info(f"loaded {len(known)} known values from {cfg.knowledge_file}")
+    known_set = set(known)
     engine = ExfiltrationEngine(
-        cfg, oracle,
-        char_predictor=CharacterPredictor(cfg.charset, order=cfg.predictor_order),
-        seq_predictor=SequencePredictor(min_prefix=cfg.min_seq_prefix),
+        cfg, oracle, char_predictor=predictor, seq_predictor=seqp,
         logger=logger, reporter=reporter,
     )
     dialect = get_dialect(cfg.dialect)
@@ -245,15 +265,26 @@ def cmd_enumerate(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
     all_complete = True
     for i in range(total):
         result = engine.extract(row(i))
-        rows.append({"offset": i, "value": result.value, "complete": result.complete})
+        rows.append({
+            "offset": i, "value": result.value, "complete": result.complete,
+            "already_known": result.value in known_set,
+        })
         all_complete = all_complete and result.complete
-        logger.info(f"[{i}] {result.value!r}{'' if result.complete else ' (partial)'}")
+        tag = " (already known)" if result.value in known_set else ""
+        logger.info(f"[{i}] {result.value!r}{'' if result.complete else ' (partial)'}{tag}")
+
+    values = [r["value"] for r in rows]
+    if cfg.knowledge_file:
+        merged = save_knowledge(cfg.knowledge_file, list(known) + values)
+        logger.info(f"knowledge file now holds {len(merged)} unique values")
 
     out = {
         "what": what,
         "table": getattr(args, "table", None),
         "count": total,
-        "values": [r["value"] for r in rows],
+        "values": values,
+        "unique_values": sorted(set(values)),
+        "new_values": sorted(set(values) - known_set),
         "rows": rows,
         "requests_completed": oracle.requests_completed,
         "requests_failed": oracle.requests_failed,

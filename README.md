@@ -208,6 +208,21 @@ Output is a JSON list:
 Enumerate a table's columns with `--what columns --table jun_users`, and cap the
 number of rows with `--limit N`.
 
+### Remembering what was already extracted
+
+Pass `--knowledge FILE` to any `extract` or `enumerate` run. Before the run the
+file's values seed the predictors; after it, the newly-found values are merged
+back as a **deduplicated set**. Because the sequence predictor proposes a known
+value as a whole-string hypothesis, a value the tool has seen before is
+confirmed in roughly a single request instead of being rebuilt character by
+character. Re-running the enumeration above against the local lab drops from 234
+requests to 45, and every row comes back flagged `already_known`, with
+`new_values` listing only what was not in the file yet.
+
+```bash
+python -m blindsqli enumerate ... --knowledge known.json
+```
+
 ---
 
 ## Configuration
@@ -231,6 +246,7 @@ Key options (see `config.example.yaml` for the full set):
 | `target_expression`, `dialect` | what SQL scalar to exfiltrate, and its dialect |
 | `classifier.*` | error-detection rules (status/body/length/headers/timing) |
 | `verbosity`, `output_file` | logging and machine-readable output |
+| `knowledge_file` | JSON set of previously-extracted values, loaded to seed prediction and updated (deduplicated) after the run |
 
 The **classifier** can detect the error condition from any combination of HTTP
 status, body signatures/regexes, body length, headers and response timing. When
