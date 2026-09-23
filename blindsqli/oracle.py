@@ -109,6 +109,23 @@ class BooleanOracle:
             self.logger.debug(f"raw request failed for [{condition}]: {exc}")
             return None
 
+    def send_raw(self, injected_value: str) -> Optional[HttpResponse]:
+        """Send one fully-built injection value verbatim (no CASE wrapping).
+
+        Unlike :meth:`_raw`, the caller supplies the entire injected string, so
+        this carries payloads that are not boolean conditions -- e.g. the
+        stacked, timing-based statements used to actively verify command
+        execution. Returns the response (with ``.elapsed``) or None on failure.
+        """
+        try:
+            resp = self.http.send(injected_value)
+            self._count(completed=1)
+            return resp
+        except (TimeoutError_, RequestError) as exc:
+            self._count(failed=1)
+            self.logger.debug(f"send_raw request failed: {exc}")
+            return None
+
     def ask(self, condition: str) -> OracleObservation:
         """Ask one boolean question, with retries for ambiguity/failure."""
         self.ensure_classifier()

