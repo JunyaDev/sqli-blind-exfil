@@ -53,6 +53,12 @@ class TableMeta:
             col.data_type = data_type
         return col
 
+    def prune_columns(self, keep_names: Iterable[str]) -> None:
+        """Drop cached columns not in *keep_names* (for forced re-discovery)."""
+        keep = set(keep_names)
+        for name in [n for n in self.columns if n not in keep]:
+            del self.columns[name]
+
 
 @dataclass
 class DatabaseMeta:
@@ -67,6 +73,12 @@ class DatabaseMeta:
             tbl = TableMeta(schema=schema, name=name)
             self.tables[key] = tbl
         return tbl
+
+    def prune_tables(self, keep_names: Iterable[str]) -> None:
+        """Drop cached tables whose name is not in *keep_names*."""
+        keep = set(keep_names)
+        for key in [k for k, t in self.tables.items() if t.name not in keep]:
+            del self.tables[key]
 
 
 @dataclass
@@ -121,6 +133,15 @@ class MetadataIndex:
         tbl = self.add_table(database, table, schema=schema)
         self.updated_at = time.time()
         return tbl.add_column(column, data_type=data_type)
+
+    def prune_databases(self, keep_names: Iterable[str]) -> None:
+        """Drop cached databases not in *keep_names* (for forced re-discovery).
+
+        The synthetic current-database placeholder ("") is always retained.
+        """
+        keep = set(keep_names) | {""}
+        for name in [n for n in self.databases if n not in keep]:
+            del self.databases[name]
 
     # ---- queries ----------------------------------------------------------
     def database_names(self) -> List[str]:
@@ -194,7 +215,14 @@ class MetadataIndex:
             db = idx.add_database(name)
             db.tables_enumerated = bool(db_data.get("tables_enumerated"))
             for _key, tbl_data in (db_data.get("tables") or {}).items():
-                tbl = db.add_table(tbl_data["name"], schema=tbl_data.get("schema", "dbo"))
+                if not isinstance(tbl_data, dict):
+                    continue
+                # Older/hand-edited files may omit "name"; recover it from the
+                # "schema.name" key rather than raising KeyError.
+                name = tbl_data.get("name")
+                if name is None:
+                    name = _key.split(".", 1)[1] if "." in _key else _key
+                tbl = db.add_table(name, schema=tbl_data.get("schema", "dbo"))
                 tbl.columns_enumerated = bool(tbl_data.get("columns_enumerated"))
                 for cn, col_data in (tbl_data.get("columns") or {}).items():
                     tbl.add_column(cn, data_type=(col_data or {}).get("data_type"))
@@ -202,8 +230,8 @@ class MetadataIndex:
 
     def save(self, path: str) -> None:
         directory = os.path.dirname(os.path.abspath(path))
-        if directory and not os.path.isdir(directory):
-            os.makedirs(directory)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(self.to_dict(), fh, indent=2)
@@ -217,5 +245,5 @@ class MetadataIndex:
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 return cls.from_dict(json.load(fh))
-        except (ValueError, OSError):
+        except (ValueError, OSError, KeyError, TypeError):
             return cls()

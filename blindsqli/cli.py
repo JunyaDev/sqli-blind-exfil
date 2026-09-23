@@ -53,7 +53,9 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--config", dest="config", default=argparse.SUPPRESS,
                         help="YAML or JSON config file (accepted here or before the subcommand)")
         sp.add_argument("--url", dest="target_url")
-        sp.add_argument("--method", dest="http_method", choices=["GET", "POST", "get", "post"])
+        sp.add_argument("--method", dest="http_method",
+                        choices=["GET", "POST", "PUT", "PATCH",
+                                 "get", "post", "put", "patch"])
         sp.add_argument("--param", dest="injection_param")
         sp.add_argument("--base-payload", dest="base_payload")
         sp.add_argument("--timeout", dest="request_timeout", type=float)
@@ -70,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
                         action="store_true", default=None,
                         help="disable TLS verification (intercepting proxy with a self-signed CA)")
         sp.add_argument("--body-mode", dest="body_mode",
-                        choices=["auto", "form", "json", "raw"],
+                        choices=["auto", "form", "json", "raw", "query", "cookie"],
                         help="how the injected value is carried (default auto)")
         sp.add_argument("--json-template", dest="json_template",
                         help="base JSON body (a JSON object string) for --body-mode json; "
@@ -100,10 +102,13 @@ def build_parser() -> argparse.ArgumentParser:
                          "extracting it, so a missing target costs one request "
                          "instead of a full failed character search")
     ex.add_argument("--target-name", dest="target_name")
-    ex.add_argument("--expr", dest="target_expression",
-                    help="scalar SQL subquery to exfiltrate")
-    ex.add_argument("--preset", choices=["first-table", "db-name"],
-                    help="use a built-in target instead of --expr")
+    # --expr and --preset are alternatives; making them mutually exclusive stops
+    # --preset from silently ignoring a supplied --expr.
+    tgt = ex.add_mutually_exclusive_group()
+    tgt.add_argument("--expr", dest="target_expression",
+                     help="scalar SQL subquery to exfiltrate")
+    tgt.add_argument("--preset", choices=["first-table", "db-name"],
+                     help="use a built-in target instead of --expr")
     ex.add_argument("--database", dest="database",
                     help="for --preset first-table: read this database's catalog")
     ex.add_argument("--output", dest="output_file")

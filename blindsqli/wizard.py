@@ -121,7 +121,13 @@ class Wizard:
                 picked.append(items[int(tok)])
             elif tok in items:
                 picked.append(tok)
-        return picked or list(items)
+        if not picked:
+            # The operator typed something that matched nothing (e.g. an
+            # out-of-range index). Select nothing rather than silently selecting
+            # everything, which would be an expensive surprise.
+            self._out(f"No valid selection in {raw!r}; nothing selected "
+                      f"(type 'all' to select everything).")
+        return picked
 
     # -- menu ---------------------------------------------------------------
     def menu_options(self) -> List[Tuple[str, str]]:
@@ -214,9 +220,11 @@ class Wizard:
                            "(skips NULL cells cheaply)? (Y/n)", "y")
         self.cfg.verify_exists = not verify.lower().startswith("n")
         from . import targets as targets_mod
-        # widen charset for real data values
+        # Widen charset for real data values. The engine snapshots its charset
+        # at construction, so this must go through set_charset() -- mutating
+        # cfg.charset alone would not reach the already-built engine.
         if self.cfg.charset != PRINTABLE_CHARSET:
-            self.cfg.charset = PRINTABLE_CHARSET
+            self.engine.set_charset(PRINTABLE_CHARSET)
         count_expr = targets_mod.row_count_expr(db, "dbo", table, where=where or None)
         total = self.engine.discover_count(count_expr)
         if total is None:

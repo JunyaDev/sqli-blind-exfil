@@ -150,9 +150,10 @@ class KeywordSearchEngine:
     def candidates_for(self, keyword: Keyword,
                        databases: Optional[List[str]] = None) -> List[ScoredColumn]:
         cols = list(self.index.iter_columns(databases))
+        # Hold the lock across ranking: rank_columns reads PatternMemory, which
+        # another worker mutates under the same lock via patterns.record().
         with self._lock:
-            patterns = self.patterns
-        return rank_columns(keyword.value, cols, patterns)
+            return rank_columns(keyword.value, cols, self.patterns)
 
     def search_keyword(self, keyword: Keyword, databases: Optional[List[str]] = None,
                        max_candidates: int = 50, stop_after: Optional[int] = None,
@@ -217,7 +218,12 @@ class KeywordSearchEngine:
                 run_one(kw)
         else:
             with ThreadPoolExecutor(max_workers=self.workers) as pool:
-                futs = [pool.submit(run_one, kw) for kw in keywords]
-                for _ in as_completed(futs):
-                    pass
+                futs = {pool.submit(run_one, kw): kw for kw in keywords}
+                for fut in as_completed(futs):
+                    try:
+                        fut.result()
+                    except Exception as exc:  # surface, don't silently drop
+                        self.logger.error(
+                            f"keyword search failed for {futs[fut].value!r}: {exc}"
+                        )
         return self.results

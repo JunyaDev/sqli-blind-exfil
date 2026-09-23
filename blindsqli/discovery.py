@@ -58,6 +58,9 @@ class MetadataDiscoverer:
         )
         for name in names:
             self.index.add_database(name)
+        if force and not self.engine.cancelled():
+            # evict databases that no longer exist (add_* is otherwise add-only)
+            self.index.prune_databases(names)
         if not self.engine.cancelled():
             self.index.databases_enumerated = True
         return self.index.database_names()
@@ -76,6 +79,8 @@ class MetadataDiscoverer:
                 self.dialect, offset=i, database=database, where=where),
         )
         tables = [self.index.add_table(database, n, schema="dbo") for n in names]
+        if force and where is None and not self.engine.cancelled():
+            db.prune_tables(names)
         if where is None and not self.engine.cancelled():
             db.tables_enumerated = True
         return tables
@@ -94,6 +99,8 @@ class MetadataDiscoverer:
                 self.dialect, table, offset=i, database=database, where=where),
         )
         cols = [tbl.add_column(n) for n in names]
+        if force and where is None and not self.engine.cancelled():
+            tbl.prune_columns(names)
         if where is None and not self.engine.cancelled():
             tbl.columns_enumerated = True
         return cols
