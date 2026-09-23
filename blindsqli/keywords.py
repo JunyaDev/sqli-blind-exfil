@@ -37,6 +37,10 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 OPT_SEP = ";;"
+# The documented separator is `` ;; `` -- surrounded by whitespace -- so a
+# keyword value that itself contains ";;" (e.g. a password "a;;b") is not
+# silently truncated at the first occurrence.
+_OPT_SEP_RE = re.compile(r"\s+;;\s+")
 _HEADING_RE = re.compile(r"^[A-Za-z0-9][\w .\-/&]{0,48}$")
 
 
@@ -96,8 +100,9 @@ def parse_keyword_line(
     """
     value_part = line
     exact, cs, tag = default_exact, default_cs, default_tag
-    if OPT_SEP in line:
-        value_part, opt_part = line.split(OPT_SEP, 1)
+    parts = _OPT_SEP_RE.split(line, maxsplit=1)
+    if len(parts) == 2:
+        value_part, opt_part = parts
         for token in opt_part.split(","):
             if token.strip():
                 exact, cs, tag = _apply_token(token, exact, cs, tag)

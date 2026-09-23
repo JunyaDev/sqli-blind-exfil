@@ -33,7 +33,15 @@ def test_length_classifier():
 
 
 def test_timing_classifier():
+    # Standard time-based idiom: a slow response means the condition was TRUE.
     c = TimingClassifier(threshold=2.0)
+    assert c.classify(html(200, "x", elapsed=3.0)).verdict is Verdict.OK
+    assert c.classify(html(200, "x", elapsed=0.1)).verdict is Verdict.ERROR
+
+
+def test_timing_classifier_inverted_polarity():
+    # A payload wired so a slow response means FALSE.
+    c = TimingClassifier(threshold=2.0, slower_is_true=False)
     assert c.classify(html(200, "x", elapsed=3.0)).verdict is Verdict.ERROR
     assert c.classify(html(200, "x", elapsed=0.1)).verdict is Verdict.OK
 

@@ -43,8 +43,8 @@ def save_knowledge(path: str, values: Iterable[str]) -> List[str]:
     """Write the deduplicated, sorted union to *path* atomically. Returns it."""
     uniq = sorted({v for v in values if isinstance(v, str) and v})
     directory = os.path.dirname(os.path.abspath(path))
-    if directory and not os.path.isdir(directory):
-        os.makedirs(directory)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump({"values": uniq}, fh, indent=2)

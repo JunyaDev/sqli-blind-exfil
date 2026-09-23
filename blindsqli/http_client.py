@@ -167,7 +167,11 @@ class HttpClient:
         backoff = self.config.retry_backoff
         rq = _requests()
 
-        for attempt in range(1, self.config.max_retries + 1):
+        # max_retries is the total number of attempts; guard against 0/negative
+        # so at least one request is always sent (otherwise this raised a
+        # misleading RequestError("None") without ever hitting the network).
+        attempts = max(1, self.config.max_retries)
+        for attempt in range(1, attempts + 1):
             start = time.time()
             try:
                 sess = self._session()
@@ -190,7 +194,7 @@ class HttpClient:
                 last_exc = exc
                 self.logger.debug(f"request error on attempt {attempt}: {exc}")
 
-            if attempt < self.config.max_retries:
+            if attempt < attempts:
                 time.sleep(backoff)
                 backoff *= 2
 

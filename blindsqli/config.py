@@ -44,8 +44,10 @@ class ClassifierConfig:
     length_threshold: Optional[int] = None  # bodies shorter than this => error
     length_tolerance: int = 0  # +/- when matching a calibrated baseline length
 
-    # Timing-based detection (for time-based error side channels).
-    timing_threshold: Optional[float] = None  # seconds; slower => error
+    # Timing-based detection (for time-based side channels).
+    timing_threshold: Optional[float] = None  # seconds
+    # Standard time-based idiom: a slow response => the condition was TRUE.
+    timing_slower_is_true: bool = True
 
     # Whether to auto-calibrate from known-true / known-false probes at start.
     auto_calibrate: bool = True

@@ -113,15 +113,26 @@ class LengthClassifier(BaseClassifier):
 
 
 class TimingClassifier(BaseClassifier):
-    """Slower-than-threshold responses are treated as errors (time side channel)."""
+    """Time side channel: a slow response signals the tested condition.
 
-    def __init__(self, threshold: float) -> None:
+    The standard time-based idiom is ``IF(condition, SLEEP(n), 0)`` -- a slow
+    response means the condition was TRUE. That is the default here
+    (``slower_is_true=True`` -> slow maps to Verdict.OK). Set
+    ``slower_is_true=False`` for a payload wired the other way round.
+    """
+
+    def __init__(self, threshold: float, slower_is_true: bool = True) -> None:
         self.threshold = threshold
+        self.slower_is_true = slower_is_true
 
     def classify(self, response: HttpResponse, sent=None) -> ClassifierDecision:
-        if response.elapsed >= self.threshold:
-            return ClassifierDecision(Verdict.ERROR, f"elapsed {response.elapsed:.3f}s >= {self.threshold}s")
-        return ClassifierDecision(Verdict.OK, f"elapsed {response.elapsed:.3f}s < {self.threshold}s")
+        slow = response.elapsed >= self.threshold
+        is_true = slow if self.slower_is_true else not slow
+        verdict = Verdict.OK if is_true else Verdict.ERROR
+        rel = ">=" if slow else "<"
+        return ClassifierDecision(
+            verdict, f"elapsed {response.elapsed:.3f}s {rel} {self.threshold}s"
+        )
 
 
 class CompositeClassifier(BaseClassifier):
@@ -244,7 +255,10 @@ def from_config(cfg: ClassifierConfig) -> Optional[BaseClassifier]:
     if cfg.length_threshold is not None:
         layers.append(LengthClassifier(cfg.length_threshold))
     if cfg.timing_threshold is not None:
-        layers.append(TimingClassifier(cfg.timing_threshold))
+        layers.append(TimingClassifier(
+            cfg.timing_threshold,
+            slower_is_true=getattr(cfg, "timing_slower_is_true", True),
+        ))
     if not layers:
         return None
     return CompositeClassifier(layers)

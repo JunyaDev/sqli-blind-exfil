@@ -20,6 +20,7 @@ from __future__ import annotations
 import enum
 import json
 import os
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional
@@ -96,47 +97,82 @@ class SearchResults:
 
     def __init__(self) -> None:
         self._by_key: Dict[tuple, KeywordMatch] = {}
+        # Guards every read and write: search() evaluates keywords concurrently,
+        # and an unlocked read racing a write raises "dict changed size".
+        self._lock = threading.RLock()
 
     @staticmethod
     def _key(m: KeywordMatch) -> tuple:
         return (m.keyword, m.location, m.match_type)
 
+    @classmethod
+    def _precedence(cls, status: MatchStatus) -> tuple:
+        # A definite oracle verdict (CONFIRMED/ABSENT) outranks any heuristic
+        # state (CANDIDATE/PROBABLE), so a proven negative is not discarded just
+        # because the cell was previously ranked a candidate. Within the same
+        # definiteness class the CONFIRMED>PROBABLE>CANDIDATE / (ABSENT) rank
+        # applies, which keeps a CONFIRMED authoritative over a later ABSENT.
+        definite = 1 if status in (MatchStatus.CONFIRMED, MatchStatus.ABSENT) else 0
+        return (definite, cls._RANK[status])
+
+    @staticmethod
+    def _merge_optional(new: KeywordMatch, prev: KeywordMatch) -> None:
+        """Preserve richer detail from *prev* when *new* leaves it unset, so a
+        re-record without row counts doesn't wipe a populated match_count."""
+        if new.match_count is None:
+            new.match_count = prev.match_count
+        if new.row_identifier is None:
+            new.row_identifier = prev.row_identifier
+        if new.where_clause is None:
+            new.where_clause = prev.where_clause
+        if not new.evidence:
+            new.evidence = prev.evidence
+
     def record(self, match: KeywordMatch) -> KeywordMatch:
         key = self._key(match)
-        prev = self._by_key.get(key)
-        if prev is None or self._RANK[match.status] >= self._RANK[prev.status]:
-            self._by_key[key] = match
-            return match
-        return prev
+        with self._lock:
+            prev = self._by_key.get(key)
+            if prev is None:
+                self._by_key[key] = match
+                return match
+            if self._precedence(match.status) >= self._precedence(prev.status):
+                self._merge_optional(match, prev)
+                self._by_key[key] = match
+                return match
+            return prev
 
     def all(self) -> List[KeywordMatch]:
-        return list(self._by_key.values())
+        with self._lock:
+            return list(self._by_key.values())
 
     def for_keyword(self, keyword: str) -> List[KeywordMatch]:
-        found = [m for m in self._by_key.values() if m.keyword == keyword]
+        with self._lock:
+            found = [m for m in self._by_key.values() if m.keyword == keyword]
         found.sort(key=lambda m: (-self._RANK[m.status], -m.confidence, m.location))
         return found
 
     def confirmed(self) -> List[KeywordMatch]:
-        return [m for m in self._by_key.values() if m.status == MatchStatus.CONFIRMED]
+        with self._lock:
+            return [m for m in self._by_key.values() if m.status == MatchStatus.CONFIRMED]
 
     def keywords(self) -> List[str]:
-        return sorted({m.keyword for m in self._by_key.values()})
+        with self._lock:
+            return sorted({m.keyword for m in self._by_key.values()})
 
     def summary(self) -> Dict[str, Dict[str, int]]:
         """Per-keyword counts by status, for a compact report."""
         out: Dict[str, Dict[str, int]] = {}
-        for m in self._by_key.values():
-            bucket = out.setdefault(m.keyword, {})
-            bucket[m.status.value] = bucket.get(m.status.value, 0) + 1
+        with self._lock:
+            for m in self._by_key.values():
+                bucket = out.setdefault(m.keyword, {})
+                bucket[m.status.value] = bucket.get(m.status.value, 0) + 1
         return out
 
     # ---- persistence ------------------------------------------------------
     def to_dict(self) -> dict:
-        return {
-            "generated_at": time.time(),
-            "matches": [m.to_dict() for m in self._by_key.values()],
-        }
+        with self._lock:
+            matches = [m.to_dict() for m in self._by_key.values()]
+        return {"generated_at": time.time(), "matches": matches}
 
     @classmethod
     def from_dict(cls, data: dict) -> "SearchResults":
@@ -147,8 +183,8 @@ class SearchResults:
 
     def save(self, path: str) -> None:
         directory = os.path.dirname(os.path.abspath(path))
-        if directory and not os.path.isdir(directory):
-            os.makedirs(directory)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(self.to_dict(), fh, indent=2)
@@ -162,5 +198,8 @@ class SearchResults:
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 return cls.from_dict(json.load(fh))
-        except (ValueError, OSError):
+        except (ValueError, OSError, KeyError, TypeError):
+            # ValueError: bad JSON; KeyError/TypeError: a row from an older or
+            # hand-edited file missing a required field. Degrade to empty rather
+            # than crash the caller.
             return cls()

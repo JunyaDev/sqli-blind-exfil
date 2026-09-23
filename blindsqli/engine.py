@@ -41,6 +41,10 @@ from .targets import Target
 # Sentinel returned by length discovery when the target is NULL/absent, so a
 # missing row is not mistaken for a value longer than max_length.
 _MISSING = -1
+# Sentinel returned by length discovery when the value is longer than
+# max_length, so an over-cap value is flagged truncated rather than reported as
+# a complete value that happens to be exactly max_length characters long.
+_OVERFLOW = -2
 
 
 @dataclass
@@ -103,6 +107,21 @@ class ExfiltrationEngine:
         # running estimate of requests spent per character, for the cost model
         self._req_per_char = max(1.0, math.log2(max(2, len(self.ordered_charset))))
 
+    def set_charset(self, charset: str) -> None:
+        """Change the charset used for extraction after construction.
+
+        The engine snapshots the charset (and builds its character predictor)
+        at construction, so mutating ``config.charset`` alone has no effect.
+        Callers that widen the charset mid-session (e.g. the wizard switching to
+        a printable set for data values) must go through here.
+        """
+        self.config.charset = charset
+        self.ordered_charset = sorted(set(charset))
+        self.char_predictor = CharacterPredictor(
+            charset, order=self.config.predictor_order
+        )
+        self._req_per_char = max(1.0, math.log2(max(2, len(self.ordered_charset))))
+
     def request_cancel(self) -> None:
         """Ask extraction to stop cleanly at the next checkpoint."""
         self._cancel.set()
@@ -134,6 +153,7 @@ class ExfiltrationEngine:
                 return self._finish(target, "", False, None, exists=False)
 
         length = None
+        over_cap = False
         if self.config.discover_length:
             length = self._discover_length(target)
             if length == _MISSING:
@@ -141,10 +161,15 @@ class ExfiltrationEngine:
                 self.logger.info(f"{target.name} does not exist (NULL); "
                                  f"nothing to extract")
                 return self._finish(target, "", False, None, exists=False)
-            if length == 0:
+            if length == _OVERFLOW:
+                # value is longer than the cap: extract up to max_length and
+                # flag the result truncated instead of falsely "complete".
+                over_cap = True
+                length = self.config.max_length
+            elif length == 0:
                 return self._finish(target, "", True, 0, exists=present)
 
-        truncated = False
+        truncated = over_cap
         value = ""
         undetermined = None
 
@@ -210,9 +235,15 @@ class ExfiltrationEngine:
             self.logger.info("cancelled before count discovery")
             return None
         hi = max_count
-        if self._is_true(f"{count_expr} <= {hi}") is not True:
-            self.logger.error(f"count exceeds max_count={hi}")
-            return hi
+        probe = self._is_true(f"{count_expr} <= {hi}")
+        if probe is False:
+            # genuinely more rows than the cap: return None (unknown) rather
+            # than max_count, which a caller can't tell from an exact count.
+            self.logger.error(f"count exceeds max_count={hi}; count undetermined")
+            return None
+        if probe is None:
+            self.logger.error("count bound probe undetermined")
+            return None
         lo = 0
         while lo < hi:
             if self._cancel.is_set():
@@ -245,7 +276,7 @@ class ExfiltrationEngine:
             self.logger.verbose(
                 f"value longer than max_length={hi}; will extract up to the cap"
             )
-            return hi
+            return _OVERFLOW
         # minimal n with length_le(n) true
         while lo < hi:
             mid = (lo + hi) // 2

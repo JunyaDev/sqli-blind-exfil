@@ -115,11 +115,35 @@ class MSSQLDialect(SqlDialect):
         return f"({s} COLLATE {self.collation})" if self.collation else s
 
     def length(self, expr: str) -> str:
-        return f"LEN({expr})"
+        # LEN() ignores trailing spaces (LEN('ab  ') == 2), which would make
+        # length discovery under-count values with trailing whitespace and then
+        # mark the truncated result "complete". Appending a sentinel character
+        # and subtracting one keeps trailing spaces significant.
+        return f"(LEN({expr} + 'x') - 1)"
 
 
 class MySQLDialect(SqlDialect):
     name = "mysql"
+
+    def quote_str(self, value: str) -> str:
+        """MySQL processes backslash escapes inside string literals, so a
+        backslash must be doubled (in addition to doubling single quotes) or a
+        value containing ``\\`` produces a malformed/unterminated literal."""
+        return "'" + value.replace("\\", "\\\\").replace("'", "''") + "'"
+
+    def _like_pattern_body(self, s: str) -> str:
+        # Two escaping layers: first backslash-escape the LIKE metacharacters
+        # (%, _, \), then escape the result again for MySQL's own string-literal
+        # parser (which also consumes backslashes) so one literal backslash
+        # survives both layers.
+        p = s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return p.replace("\\", "\\\\").replace("'", "''")
+
+    def like_literal(self, prefix: str) -> str:
+        return "'" + self._like_pattern_body(prefix) + "%' ESCAPE '\\\\'"
+
+    def _contains_literal(self, needle: str) -> str:
+        return "'%" + self._like_pattern_body(needle) + "%' ESCAPE '\\\\'"
 
     def substring(self, expr: str, pos: int, length: int) -> str:
         return f"SUBSTRING({expr},{pos},{length})"
