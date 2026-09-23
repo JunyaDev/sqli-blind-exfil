@@ -77,18 +77,29 @@ def _catalog_prefix(database: str) -> str:
     return "[" + database.replace("]", "]]") + "]."
 
 
-def first_table_name(dialect: SqlDialect, offset: int = 0, database: str = None) -> Target:
+def tables_count_expr(database: str = None, where: str = None) -> str:
+    """COUNT(*) of tables, optionally filtered by *where* (e.g. a LIKE clause)."""
+    src = f"{_catalog_prefix(database)}INFORMATION_SCHEMA.TABLES"
+    filt = f" WHERE {where}" if where else ""
+    return f"(SELECT COUNT(*) FROM {src}{filt})"
+
+
+def first_table_name(dialect: SqlDialect, offset: int = 0, database: str = None,
+                     where: str = None) -> Target:
     """First (offset-th) table name from INFORMATION_SCHEMA (MSSQL-style).
 
     If *database* is given, read that database's catalog instead of the current
-    one (three-part naming).
+    one (three-part naming). *where* is an optional SQL filter on the catalog
+    (e.g. "TABLE_NAME LIKE '%user%'") applied to both the count and each name;
+    it must match the filter passed to :func:`tables_count_expr`.
     """
     src = f"{_catalog_prefix(database)}INFORMATION_SCHEMA.TABLES"
+    filt = f" WHERE {where}" if where else ""
     if offset == 0:
-        expr = f"(SELECT TOP(1) TABLE_NAME FROM {src} ORDER BY TABLE_NAME)"
+        expr = f"(SELECT TOP(1) TABLE_NAME FROM {src}{filt} ORDER BY TABLE_NAME)"
     else:
         expr = (
-            f"(SELECT TABLE_NAME FROM {src} ORDER BY TABLE_NAME "
+            f"(SELECT TABLE_NAME FROM {src}{filt} ORDER BY TABLE_NAME "
             f"OFFSET {offset} ROWS FETCH NEXT 1 ROWS ONLY)"
         )
     label = f"TABLE_NAME[{offset}]" if not database else f"TABLE_NAME[{database}:{offset}]"

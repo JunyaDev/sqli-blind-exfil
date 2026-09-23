@@ -141,24 +141,63 @@ def extract_condition(injected_value: str) -> str | None:
 _RE_COUNT = re.compile(r"COUNT\(\*\)", re.IGNORECASE)
 _RE_COUNT_CMP = re.compile(r"(<=|>=|<|>|=)\s*(\d+)")
 _RE_OFFSET = re.compile(r"OFFSET\s+(\d+)\s+ROWS", re.IGNORECASE)
+# A catalog filter the tool emits for `enumerate --what tables --where ...`,
+# e.g. "WHERE TABLE_NAME LIKE '%user%'". This is distinct from the prefix LIKE
+# the value search wraps around the subquery, so it is matched (and stripped)
+# specifically as a WHERE <col> LIKE clause before the rest runs.
+_RE_WHERE_LIKE = re.compile(
+    r"WHERE\s+[\w.\[\]]+\s+LIKE\s*'((?:[^']|'')*)'",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _like_to_regex(pattern: str) -> "re.Pattern":
+    """Compile a SQL LIKE pattern (% and _ wildcards) to an anchored regex."""
+    pattern = _unquote_sql(pattern)
+    out, i = [], 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "\\" and i + 1 < len(pattern):
+            out.append(re.escape(pattern[i + 1]))
+            i += 2
+            continue
+        if c == "%":
+            out.append(".*")
+        elif c == "_":
+            out.append(".")
+        else:
+            out.append(re.escape(c))
+        i += 1
+    # MSSQL's default collation is case-insensitive; mirror that for the filter.
+    return re.compile("^" + "".join(out) + "$", re.IGNORECASE | re.DOTALL)
 
 
 def evaluate_condition_multi(condition: str, secrets: list) -> bool:
     """Evaluate a condition against a *rowset*.
 
-    Adds two things over the single-secret evaluator so the mock can serve
-    enumeration: COUNT(*) comparisons against the number of rows, and OFFSET n
-    row selection.
+    Adds three things over the single-secret evaluator so the mock can serve
+    enumeration: an optional ``WHERE <col> LIKE '...'`` catalog filter that
+    narrows the rowset, COUNT(*) comparisons against the (filtered) row count,
+    and OFFSET n row selection. Only a single LIKE predicate is simulated; a
+    compound WHERE (AND/OR of several predicates) is beyond this lab mock.
     """
+    rows = secrets
+    m = _RE_WHERE_LIKE.search(condition)
+    if m:
+        rx = _like_to_regex(m.group(1))
+        rows = [s for s in secrets if rx.match(s)]
+        # Drop the filter clause so any *value-search* LIKE left in the
+        # condition is what the single-secret evaluator sees downstream.
+        condition = condition[:m.start()] + condition[m.end():]
     if _RE_COUNT.search(condition):
         m = _RE_COUNT_CMP.search(condition)
         if not m:
             return False
-        op, num, c = m.group(1), int(m.group(2)), len(secrets)
+        op, num, c = m.group(1), int(m.group(2)), len(rows)
         return {"<=": c <= num, ">=": c >= num, "<": c < num, ">": c > num, "=": c == num}[op]
     m = _RE_OFFSET.search(condition)
     idx = int(m.group(1)) if m else 0
-    secret = secrets[idx] if 0 <= idx < len(secrets) else ""
+    secret = rows[idx] if 0 <= idx < len(rows) else ""
     return evaluate_condition(condition, secret)
 
 
@@ -272,11 +311,19 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Local mock SQLi training target")
     ap.add_argument("--port", type=int, default=3000)
     ap.add_argument("--secret", default="jun_users", help="the scalar the injection extracts")
+    ap.add_argument("--secrets",
+                    help="comma-separated rowset (in ORDER BY order) for enumeration, "
+                         "e.g. table names: 'accounts,jun_users,products,user_sessions'. "
+                         "Overrides --secret when given.")
     ap.add_argument("--param", default="q")
     args = ap.parse_args()
-    srv = MockTarget(secret=args.secret, param=args.param, port=args.port)
+    rows = None
+    if args.secrets:
+        rows = [s.strip() for s in args.secrets.split(",") if s.strip()]
+    srv = MockTarget(secret=args.secret, param=args.param, port=args.port, secrets=rows)
     srv.start()
-    print(f"mock target on {srv.url} (param={args.param}, secret={args.secret!r})")
+    shown = rows if rows is not None else args.secret
+    print(f"mock target on {srv.url} (param={args.param}, secret(s)={shown!r})")
     try:
         srv.thread.join()
     except KeyboardInterrupt:

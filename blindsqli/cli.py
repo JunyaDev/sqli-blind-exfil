@@ -110,7 +110,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="separator between concatenated columns (default ':')")
     en.add_argument("--schema", dest="schema", default="dbo",
                     help="table schema for --what rows (default: dbo)")
-    en.add_argument("--where", dest="where", help="optional SQL WHERE filter for --what rows")
+    en.add_argument("--where", dest="where",
+                    help="optional SQL WHERE filter: on TABLE_NAME for --what tables "
+                         "(e.g. \"TABLE_NAME LIKE '%%user%%'\"), or on the data rows "
+                         "for --what rows")
     en.add_argument("--order-by", dest="order_by",
                     help="ORDER BY expression for --what rows (default: first column)")
     en.add_argument("--row-expr", dest="row_expr",
@@ -322,8 +325,10 @@ def cmd_enumerate(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
             sep=sep, where=where, order_by=order_by, row_expr=row_expr,
         )
     else:
-        count_expr = f"(SELECT COUNT(*) FROM {catalog}INFORMATION_SCHEMA.TABLES)"
-        row = lambda i: targets_mod.first_table_name(dialect, offset=i, database=database)
+        where = getattr(args, "where", None)
+        count_expr = targets_mod.tables_count_expr(database, where=where)
+        row = lambda i: targets_mod.first_table_name(
+            dialect, offset=i, database=database, where=where)
 
     logger.info(f"Enumerating {what} from {cfg.target_url}")
     rows = []
