@@ -28,6 +28,7 @@ from .knowledge import load_knowledge, save_knowledge, seed_predictors
 from .reporting import NullReporter, TerminalReporter
 from .scope import ScopeError
 from . import targets as targets_mod
+from . import rce
 from .discovery import MetadataDiscoverer
 from .keywords import load_keywords, parse_keyword_line
 from .metadata import MetadataIndex
@@ -186,6 +187,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     cal = sub.add_parser("calibrate", help="probe target and show true/false fingerprints")
     add_common(cal)
+
+    rc = sub.add_parser("rce", help="assess MSSQL RCE reachability (read-only: "
+                                    "privilege + which exec primitives are enabled)")
+    add_common(rc)
+    rc.add_argument("--json", dest="rce_json", action="store_true",
+                    help="emit findings and verdict as JSON instead of a report")
 
     sub.add_parser("version", help="print version")
     return p
@@ -571,6 +578,31 @@ def cmd_wizard(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
         return wiz.run()
 
 
+def cmd_rce(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
+    if cfg.dialect != "mssql":
+        logger.error(f"rce assessment is MSSQL-only (dialect is {cfg.dialect!r})")
+        return 2
+    engine = _build_engine(cfg, logger)
+
+    def _log(f: rce.Finding) -> None:
+        logger.info(f"{rce._STATUS_MARK[f.status]} {f.check.title}: {f.status.value}")
+
+    with _GracefulStop(engine, logger):
+        findings = rce.assess(engine, on_finding=_log if cfg.verbosity else None)
+    summary = rce.summarize(findings)
+
+    if getattr(args, "rce_json", False):
+        print(json.dumps({
+            "verdict": summary,
+            "findings": [f.to_dict() for f in findings],
+            "requests_completed": engine.oracle.requests_completed,
+        }, indent=2))
+    else:
+        print(rce.format_report(findings, summary))
+        logger.info(f"{engine.oracle.requests_completed} oracle requests")
+    return 0
+
+
 # ----------------------------------------------------------------- entry
 def main(argv: Optional[list] = None) -> int:
     parser = build_parser()
@@ -600,6 +632,8 @@ def main(argv: Optional[list] = None) -> int:
             return cmd_search(cfg, args, logger)
         if args.command == "wizard":
             return cmd_wizard(cfg, args, logger)
+        if args.command == "rce":
+            return cmd_rce(cfg, args, logger)
     except ScopeError as exc:
         print(f"scope error: {exc}", file=sys.stderr)
         return 3
