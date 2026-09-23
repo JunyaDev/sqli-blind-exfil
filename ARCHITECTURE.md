@@ -56,6 +56,7 @@ narrow interface of the one below it.
 | `ranking` | Heuristic scoring of candidate columns + pattern memory | metadata |
 | `results` | Persistent per-keyword match store with a status ladder | metadata |
 | `search` | Cross-scope keyword search: rank -> confirm -> record; cost estimate | engine, discovery, ranking, results, targets |
+| `rce` | MSSQL RCE reachability: read-only privilege/primitive assessment (`assess`) + active timing-based execution verification (`verify_execution`) | engine, oracle, result_types |
 | `wizard` | Interactive setup/exploration flow over the modules above | all of the above |
 | `cli` | Wire everything together, I/O | all of the above |
 

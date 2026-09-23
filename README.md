@@ -392,6 +392,70 @@ exact name, or a `LIKE` pattern (`%user%`). See
 
 ---
 
+## Assessing RCE reachability (MSSQL)
+
+The `rce` subcommand is a **read-only** attack-surface assessment. Over the same
+boolean oracle it settles each "can code execution be reached from here" fact:
+your privilege context, whether each execution primitive is enabled or present
+(xp_cmdshell, OLE Automation, CLR, external scripts, SQL Agent), linked-server
+lateral paths, and auxiliary coercion procedures. It runs no commands.
+
+```bash
+python -m blindsqli rce --config lab-config.json
+python -m blindsqli rce --config lab-config.json --json   # machine-readable
+```
+
+Each finding is `[+]` present, `[-]` absent, or `[?]` undecided (permission
+denied / ambiguous, never assumed safe). The header gives an overall verdict:
+`VULNERABLE`, `LIKELY`, `INCONCLUSIVE`, or `NOT REACHABLE`.
+
+## Confirming real command execution (timing side channel)
+
+`rce` reports what is *enabled*; it cannot prove a command *ran*, because a blind
+boolean response carries no command output. `exec-check` closes that gap with a
+timing side channel: it makes a primitive sleep for a chosen number of seconds
+and confirms execution only if the HTTP response is delayed by that amount. This
+is the one **active** part of the RCE tooling (it makes the server sleep).
+
+```bash
+# Default: a WAITFOR control + both xp_cmdshell variants, 5s delay.
+python -m blindsqli exec-check --config lab-config.json
+
+# One probe, custom delay, JSON output.
+python -m blindsqli exec-check --config lab-config.json \
+    --probe xp_cmdshell_nix --exec-delay 6 --json
+```
+
+How it decides, per probe:
+
+- a **baseline** latency is measured (the same primitive with a 0-second sleep);
+- the probe is sent `--exec-trials` times at the requested delay; a response
+  slower than `baseline + delay*0.6` is a hit;
+- a final trial at **twice** the delay guards against a coincidentally slow
+  server — the excess must grow with the delay (disable with `--no-scale-check`).
+
+Probes (`--probe`, repeatable; default `auto`):
+
+| probe | proves |
+|-------|--------|
+| `waitfor` | stacked-query execution and that the timing channel works — **not** OS exec |
+| `xp_cmdshell_nix` | `xp_cmdshell 'sleep N'` ran an OS command on a **Linux** host |
+| `xp_cmdshell_win` | `xp_cmdshell 'ping'` ran an OS command on a **Windows** host |
+
+The `waitfor` control is the key to reading a negative result: if it is
+`CONFIRMED` but the OS probes are `NOT CONFIRMED`, the injection and timing
+channel work and the OS primitive genuinely does not execute (e.g. xp_cmdshell on
+SQL Server for Linux, which cannot be enabled). If even `waitfor` is not
+confirmed, stacked queries or the breakout are wrong for your injection context —
+adjust `--exec-payload` (default `'; {sql} --`) or supply a bespoke statement
+with `--exec-sql "...{secs}..."` (e.g. an OLE/CLR one-liner).
+
+`exec-check` temporarily raises the request timeout so the delay is observed, and
+restores it afterward. Keep `--exec-delay` well under any upstream (proxy / load
+balancer) timeout.
+
+---
+
 ## Configuration
 
 Everything environment-specific is configurable via flags or a JSON/YAML file
