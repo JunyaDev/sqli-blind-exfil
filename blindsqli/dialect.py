@@ -19,6 +19,12 @@ class SqlDialect:
     # *_CI_AS), where 'A' = 'a' would otherwise corrupt both equality tests
     # and the ordinal binary search. None means "use the server default".
     collation = None
+    # Collations used by the value-search matcher to force a chosen case
+    # behaviour regardless of the target's default. None -> rely on the
+    # server default (documented limitation for engines without named
+    # collations here).
+    cs_collation = None  # case-sensitive
+    ci_collation = None  # case-insensitive
 
     # --- literal escaping ---------------------------------------------------
     def quote_str(self, value: str) -> str:
@@ -56,6 +62,36 @@ class SqlDialect:
     def prefix_like(self, expr: str, prefix: str) -> str:
         return f"{expr} LIKE {self.like_literal(prefix)}"
 
+    # --- value-search matchers ---------------------------------------------
+    def _contains_literal(self, needle: str) -> str:
+        """Quote *needle* as a substring LIKE pattern ('%needle%')."""
+        escaped = (
+            needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        return "'%" + escaped.replace("'", "''") + "%' ESCAPE '\\'"
+
+    def _matched(self, expr: str, case_sensitive: bool) -> str:
+        """Apply an explicit collation to *expr* for the chosen case behaviour."""
+        coll = self.cs_collation if case_sensitive else self.ci_collation
+        return f"({expr} COLLATE {coll})" if coll else expr
+
+    def contains(self, expr: str, needle: str, case_sensitive: bool = False) -> str:
+        """Condition: *expr* contains *needle* as a substring."""
+        return f"{self._matched(expr, case_sensitive)} LIKE {self._contains_literal(needle)}"
+
+    def value_eq(self, expr: str, value: str, case_sensitive: bool = False) -> str:
+        """Condition: *expr* equals *value* exactly."""
+        return f"{self._matched(expr, case_sensitive)} = {self.quote_str(value)}"
+
+    def is_not_null(self, expr: str) -> str:
+        """Condition: *expr* yields a non-NULL value (i.e. the row/value exists).
+
+        A scalar subquery that selects nothing returns NULL, so this is the
+        cheapest existence check: one boolean question tells extraction whether
+        there is anything to recover before it iterates character by character.
+        """
+        return f"{expr} IS NOT NULL"
+
     def length_eq(self, expr: str, n: int) -> str:
         return f"{self.length(expr)} = {n}"
 
@@ -71,6 +107,8 @@ class MSSQLDialect(SqlDialect):
     # Force a binary (case-sensitive, code-point-ordered) collation so
     # comparisons are deterministic regardless of the database's default.
     collation = "Latin1_General_BIN"
+    cs_collation = "Latin1_General_BIN"
+    ci_collation = "Latin1_General_CI_AS"
 
     def substring(self, expr: str, pos: int, length: int) -> str:
         s = f"SUBSTRING({expr},{pos},{length})"

@@ -102,6 +102,11 @@ class Config:
     max_length: int = 64
     strategy: str = "adaptive"  # adaptive | linear | binary
     discover_length: bool = True
+    # Probe that the target yields a non-NULL value before extracting it. A
+    # missing row then costs one request instead of a full failed extraction.
+    # (Length discovery also guards this automatically; this makes the check
+    # explicit and up-front, and lets enumeration skip NULL cells cheaply.)
+    verify_exists: bool = False
 
     # prediction / batching knobs
     predictor_order: int = 3   # Markov order for the character predictor

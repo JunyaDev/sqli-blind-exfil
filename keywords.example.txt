@@ -1,0 +1,16 @@
+# Example keyword file for `blindsqli search`.
+# One keyword per line. Blank lines and comment lines are ignored.
+# A short "# Heading" line tags the keywords beneath it.
+
+# Accounts
+admin
+alice@example.com
+
+# Business data
+invoice ;; exact
+customer
+
+# Infrastructure
+#! tag=infra
+internal
+project-x

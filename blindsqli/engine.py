@@ -38,6 +38,10 @@ from .result_types import OracleResult
 from .sequence import SequencePredictor
 from .targets import Target
 
+# Sentinel returned by length discovery when the target is NULL/absent, so a
+# missing row is not mistaken for a value longer than max_length.
+_MISSING = -1
+
 
 @dataclass
 class ExtractionResult:
@@ -50,7 +54,14 @@ class ExtractionResult:
     requests_completed: int = 0
     requests_failed: int = 0
     cancelled: bool = False
+    # None -> existence was not probed; True/False -> the target does/doesn't
+    # yield a non-NULL value. False means extraction was skipped as pointless.
+    exists: Optional[bool] = None
     notes: List[str] = field(default_factory=list)
+
+    @property
+    def missing(self) -> bool:
+        return self.exists is False
 
     def to_dict(self) -> dict:
         return {
@@ -61,8 +72,7 @@ class ExtractionResult:
             "truncated": self.truncated,
             "undetermined_at": self.undetermined_at,
             "cancelled": self.cancelled,
-            "requests_completed": self.requests_completed,
-            "requests_failed": self.requests_failed,
+            "exists": self.exists,
             "notes": self.notes,
         }
 
@@ -101,15 +111,38 @@ class ExfiltrationEngine:
         return self._cancel.is_set()
 
     # ------------------------------------------------------------- public API
+    def exists(self, target: Target) -> Optional[bool]:
+        """Verify the target yields a (non-NULL) value, in one boolean question.
+
+        Returns True/False, or None if the oracle could not decide. Extraction
+        uses this to avoid iterating character by character over a row that is
+        not there.
+        """
+        self.oracle.ensure_classifier()
+        return self._is_true(target.exists_condition())
+
     def extract(self, target: Target) -> ExtractionResult:
         """Recover the full scalar value for *target*."""
         self.oracle.ensure_classifier()  # calibrate before any concurrency
 
+        present: Optional[bool] = None
+        if self.config.verify_exists:
+            present = self.exists(target)
+            if present is False:
+                self.logger.info(f"{target.name} does not exist (NULL); "
+                                 f"skipping extraction")
+                return self._finish(target, "", False, None, exists=False)
+
         length = None
         if self.config.discover_length:
             length = self._discover_length(target)
+            if length == _MISSING:
+                # length discovery proved the target is NULL/absent
+                self.logger.info(f"{target.name} does not exist (NULL); "
+                                 f"nothing to extract")
+                return self._finish(target, "", False, None, exists=False)
             if length == 0:
-                return self._finish(target, "", True, 0)
+                return self._finish(target, "", True, 0, exists=present)
 
         truncated = False
         value = ""
@@ -160,7 +193,10 @@ class ExfiltrationEngine:
         # feed the finished value into both predictors for future targets
         self.char_predictor.learn_value(value)
         self.seq_predictor.learn_value(value)
-        return self._finish(target, value, complete, length, truncated, undetermined, cancelled)
+        # a value was recovered (or partially), so the target does exist
+        exists = True if (present is None and value != "") else present
+        return self._finish(target, value, complete, length, truncated,
+                            undetermined, cancelled, exists=exists)
 
     # --------------------------------------------------------------- count
     def discover_count(self, count_expr: str, max_count: int = 4096) -> Optional[int]:
@@ -200,6 +236,12 @@ class ExfiltrationEngine:
         lo, hi = 0, self.config.max_length
         # First confirm it is within bound.
         if self._is_true(target.length_le(hi)) is not True:
+            # LEN(...) <= hi being not-true can mean the value is genuinely
+            # longer than the cap, OR that the target is NULL/absent (LEN(NULL)
+            # is NULL, which also reads as not <= hi). One existence probe tells
+            # them apart, so a missing row is not extracted 64 futile times.
+            if self.exists(target) is False:
+                return _MISSING
             self.logger.verbose(
                 f"value longer than max_length={hi}; will extract up to the cap"
             )
@@ -378,7 +420,7 @@ class ExfiltrationEngine:
         )
 
     def _finish(self, target, value, complete, length, truncated=False,
-                undetermined=None, cancelled=False) -> ExtractionResult:
+                undetermined=None, cancelled=False, exists=None) -> ExtractionResult:
         result = ExtractionResult(
             target=target.name,
             value=value,
@@ -387,9 +429,12 @@ class ExfiltrationEngine:
             truncated=truncated,
             undetermined_at=undetermined,
             cancelled=cancelled,
+            exists=exists,
             requests_completed=self.oracle.requests_completed,
             requests_failed=self.oracle.requests_failed,
         )
+        if exists is False:
+            result.notes.append("target does not exist (NULL); extraction skipped")
         if truncated:
             result.notes.append(f"stopped at max_length={self.config.max_length}")
         if undetermined is not None:

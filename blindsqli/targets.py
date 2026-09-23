@@ -51,6 +51,15 @@ class Target:
         """Condition: the value begins with *prefix* (LIKE prefix match)."""
         return self.dialect.prefix_like(self.expression, prefix)
 
+    # --- existence ----------------------------------------------------------
+    def exists_condition(self) -> str:
+        """Condition: this target yields a (non-NULL) value / row.
+
+        Used to verify a target exists before extracting it, so a missing row
+        costs a single request instead of a full, futile character search.
+        """
+        return self.dialect.is_not_null(self.expression)
+
     # --- length hypotheses --------------------------------------------------
     def length_is(self, n: int) -> str:
         return self.dialect.length_eq(self.expression, n)
@@ -194,6 +203,32 @@ def row_value(dialect: SqlDialect, table: str, columns, offset: int = 0,
         f"OFFSET {offset} ROWS FETCH NEXT 1 ROWS ONLY)"
     )
     return Target(name=f"ROW[{table}:{offset}]", expression=expr, dialect=dialect)
+
+
+def match_where(dialect: SqlDialect, column: str, needle: str,
+                exact: bool = False, case_sensitive: bool = False) -> str:
+    """A WHERE predicate testing whether *column* matches *needle*.
+
+    Substring by default (``LIKE '%needle%'``), or exact equality. Reusable both
+    to confirm a location (wrapped in COUNT>0) and to filter the rows extracted
+    from a confirmed location.
+    """
+    if exact:
+        return dialect.value_eq(_bracket(column), needle, case_sensitive)
+    return dialect.contains(_bracket(column), needle, case_sensitive)
+
+
+def column_match_count_expr(dialect: SqlDialect, database, schema, table, column,
+                            needle: str, exact: bool = False,
+                            case_sensitive: bool = False) -> str:
+    """COUNT(*) of rows where *column* matches *needle* (see :func:`match_where`).
+
+    ``column_match_count_expr(...) > 0`` is the single boolean question that
+    confirms a keyword lives in a column, over the boolean side channel.
+    """
+    src = _table_source(database, schema, table)
+    pred = match_where(dialect, column, needle, exact=exact, case_sensitive=case_sensitive)
+    return f"(SELECT COUNT(*) FROM {src} WHERE {pred})"
 
 
 def custom(dialect: SqlDialect, name: str, expression: str) -> Target:

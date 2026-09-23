@@ -50,7 +50,38 @@ narrow interface of the one below it.
 | `sequence` | Recurring-pattern / completion proposals + cost model | — |
 | `engine` | Adaptive search, length discovery, concurrency, model updates | oracle, predictor, sequence, targets |
 | `reporting` | Live terminal progress | result_types |
+| `metadata` | Shared, cacheable index of discovered schema (db/table/column) | — |
+| `discovery` | Read-only enumeration into the index, with caching | engine, targets, metadata |
+| `keywords` | Parse keyword files (comments, directives, per-keyword modes) | — |
+| `ranking` | Heuristic scoring of candidate columns + pattern memory | metadata |
+| `results` | Persistent per-keyword match store with a status ladder | metadata |
+| `search` | Cross-scope keyword search: rank -> confirm -> record; cost estimate | engine, discovery, ranking, results, targets |
+| `wizard` | Interactive setup/exploration flow over the modules above | all of the above |
 | `cli` | Wire everything together, I/O | all of the above |
+
+## The value-search layer
+
+The search subsystem sits on top of the same oracle and reuses the same
+`Target`/`dialect` condition grammar. It turns *"I know several values but not
+where they live"* into *"here are the confirmed locations"* without dumping
+everything:
+
+```text
+keywords ──► discover/reuse metadata index ──► rank candidate columns
+   (per keyword, independently)                     │ heuristics only
+                                                    ▼
+                        confirm top candidates: COUNT(* WHERE col matches) > 0
+                                                    │ the oracle is the truth
+                                                    ▼
+                         record per-keyword match (CANDIDATE/PROBABLE/
+                         CONFIRMED/ABSENT) ──► targeted extraction (WHERE reuse)
+```
+
+Discovery is cached in `metadata.MetadataIndex`, so N keywords share one
+enumeration. Ranking (`ranking.py`) only *orders* work; every hit is confirmed
+through the boolean oracle. Confirmed locations feed `ranking.PatternMemory`, so
+recurring naming conventions raise the priority of look-alike columns. All
+queries are read-only; keywords are never merged into a single query.
 
 Because dependencies point one way, you can replace, say, the `classifier`
 implementation (hand-written rules ↔ auto-calibrated baseline ↔ an ML model)
@@ -74,6 +105,11 @@ does not know how the true/false decision is made.
 
 For each value:
 
+0. **Existence check** — a scalar subquery that selects nothing returns `NULL`.
+   Extraction verifies the target is non-NULL before iterating, so a missing row
+   costs one request instead of a full character search. This is automatic
+   inside length discovery (it tells "NULL/absent" apart from "longer than the
+   cap") and can also be done up front with `verify_exists`.
 1. **Length discovery** — binary search on `LEN(expr) <= n` over `[0, max_length]`
    (≈ log₂ requests), or skip and stop at a terminator.
 2. **Per position** (1-based `SUBSTRING`):
