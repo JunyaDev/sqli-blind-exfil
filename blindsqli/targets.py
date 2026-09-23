@@ -123,12 +123,27 @@ def nth_database_name(dialect: SqlDialect, offset: int = 0) -> Target:
     return Target(name=f"DATABASE_NAME[{offset}]", expression=expr, dialect=dialect)
 
 
-def first_column_name(dialect: SqlDialect, table: str, offset: int = 0,
-                      database: str = None) -> Target:
+def columns_count_expr(table: str, database: str = None, where: str = None) -> str:
+    """COUNT(*) of columns for *table*, optionally narrowed by *where*.
+
+    *where* is ANDed with the table-name predicate (e.g. "TABLE_SCHEMA='dbo'"
+    to restrict to the dbo schema); it must match the filter given to
+    :func:`first_column_name`.
+    """
     src = f"{_catalog_prefix(database)}INFORMATION_SCHEMA.COLUMNS"
+    tbl = table.replace("'", "''")
+    extra = f" AND ({where})" if where else ""
+    return f"(SELECT COUNT(*) FROM {src} WHERE TABLE_NAME='{tbl}'{extra})"
+
+
+def first_column_name(dialect: SqlDialect, table: str, offset: int = 0,
+                      database: str = None, where: str = None) -> Target:
+    src = f"{_catalog_prefix(database)}INFORMATION_SCHEMA.COLUMNS"
+    tbl = table.replace("'", "''")
+    extra = f" AND ({where})" if where else ""
     expr = (
         f"(SELECT COLUMN_NAME FROM {src} "
-        f"WHERE TABLE_NAME = '{table}' ORDER BY ORDINAL_POSITION "
+        f"WHERE TABLE_NAME = '{tbl}'{extra} ORDER BY ORDINAL_POSITION "
         f"OFFSET {offset} ROWS FETCH NEXT 1 ROWS ONLY)"
     )
     label = f"COLUMN_NAME[{table}:{offset}]" if not database else f"COLUMN_NAME[{database}.{table}:{offset}]"

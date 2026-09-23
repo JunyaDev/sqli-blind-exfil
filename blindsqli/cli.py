@@ -111,9 +111,12 @@ def build_parser() -> argparse.ArgumentParser:
     en.add_argument("--schema", dest="schema", default="dbo",
                     help="table schema for --what rows (default: dbo)")
     en.add_argument("--where", dest="where",
-                    help="optional SQL WHERE filter: on TABLE_NAME for --what tables "
-                         "(e.g. \"TABLE_NAME LIKE '%%user%%'\"), or on the data rows "
-                         "for --what rows")
+                    help="optional SQL WHERE filter on the catalog/rows: for --what "
+                         "tables it filters INFORMATION_SCHEMA.TABLES (e.g. "
+                         "\"TABLE_NAME LIKE '%%user%%'\" or \"TABLE_SCHEMA='dbo'\"); for "
+                         "--what columns it is ANDed with the TABLE_NAME predicate on "
+                         "INFORMATION_SCHEMA.COLUMNS (e.g. \"TABLE_SCHEMA='dbo'\"); for "
+                         "--what rows it filters the data rows")
     en.add_argument("--order-by", dest="order_by",
                     help="ORDER BY expression for --what rows (default: first column)")
     en.add_argument("--row-expr", dest="row_expr",
@@ -294,7 +297,6 @@ def cmd_enumerate(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
         dialect.collation = cfg.collation or None
 
     database = cfg.database
-    catalog = targets_mod._catalog_prefix(database) if database else ""
     if what == "databases":
         count_expr = "(SELECT COUNT(*) FROM sys.databases)"
         row = lambda i: targets_mod.nth_database_name(dialect, offset=i)
@@ -302,9 +304,10 @@ def cmd_enumerate(cfg: Config, args: argparse.Namespace, logger: Logger) -> int:
         if not getattr(args, "table", None):
             logger.error("--what columns requires --table")
             return 2
-        tbl = args.table.replace("'", "''")
-        count_expr = f"(SELECT COUNT(*) FROM {catalog}INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='{tbl}')"
-        row = lambda i: targets_mod.first_column_name(dialect, args.table, offset=i, database=database)
+        where = getattr(args, "where", None)
+        count_expr = targets_mod.columns_count_expr(args.table, database=database, where=where)
+        row = lambda i: targets_mod.first_column_name(
+            dialect, args.table, offset=i, database=database, where=where)
     elif what == "rows":
         table = getattr(args, "table", None)
         if not table:
